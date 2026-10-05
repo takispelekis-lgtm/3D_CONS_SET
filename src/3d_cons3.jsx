@@ -39,9 +39,9 @@ const hslToRgb = (h, s, l) => {
 
 const formatTime = (sec) => {
     const days = sec / 86400;
-    if (days < 30) return `${Math.round(days)} Ημέρες`;
+    if (days < 29.5) return Math.round(days) === 1 ? '1 Ημέρα' : `${Math.round(days)} Ημέρες`;
     const months = days / 30.416;
-    if (months < 12) return `${Math.round(months)} Μήνες`;
+    if (months < 11.5) return Math.round(months) === 1 ? '1 Μήνας' : `${Math.round(months)} Μήνες`;
     const years = days / 365.25;
     return `${years.toFixed(1)} Έτη`;
 };
@@ -95,7 +95,9 @@ const getInitialState = () => {
   try {
     const saved = localStorage.getItem('geoConsolidateState_v1');
     if (saved) return JSON.parse(saved);
-  } catch (e) {}
+  } catch {
+    // Κατεστραμμένη ή μη διαθέσιμη αποθήκευση: ξεκινάμε από το προεπιλεγμένο μοντέλο
+  }
   return null;
 };
 
@@ -321,12 +323,13 @@ const TimePlotChart = ({ data, finalSettlement }) => {
 // Component Εισαγωγής με Εκθετική Μορφή (e.g. 1e-9)
 const KyInput = ({ value, onChange }) => {
   const [str, setStr] = useState(value !== undefined ? Number(value).toExponential() : '');
-  
-  useEffect(() => {
-    if (Number(str) !== value && value !== undefined) {
-        setStr(Number(value).toExponential());
-    }
-  }, [value]); // eslint-disable-line react-hooks/exhaustive-deps
+  const [prevValue, setPrevValue] = useState(value);
+
+  // Συγχρονισμός όταν η τιμή αλλάζει απ' έξω (π.χ. επιλογή άλλης στρώσης)
+  if (value !== prevValue) {
+    setPrevValue(value);
+    if (Number(str) !== value && value !== undefined) setStr(Number(value).toExponential());
+  }
 
   const handleBlur = () => {
     const num = Number(str);
@@ -436,7 +439,9 @@ const App = () => {
         if (data.heatmaps) setHeatmaps(data.heatmaps);
         if (data.heatmapLevels) setHeatmapLevels(data.heatmapLevels);
         if (data.profileZ !== undefined) setProfileZ(data.profileZ);
-      } catch (err) {}
+      } catch {
+        alert('Το αρχείο δεν είναι έγκυρο μοντέλο CONS_3D (JSON).');
+      }
     };
     reader.readAsText(file);
     event.target.value = null; 
@@ -531,32 +536,31 @@ const App = () => {
     const dy = Math.max(0.5, (maxY - minY) / 50);
     const matrix = [];
     
-    const embDx = dx; 
+    const embDx = dx;
     const embSlices = [];
-    let embMinX = Infinity, embMaxX = -Infinity;
-    embankments.forEach(e => e.points.forEach(p => { if(p.x < embMinX) embMinX = p.x; if(p.x > embMaxX) embMaxX = p.x; }));
 
-    if (embankments.length > 0) {
+    // Κάθε 2D επίχωμα τεμαχίζεται ξεχωριστά με το δικό του γ (επαλληλία)
+    embankments.forEach(emb => {
+      const embMinX = Math.min(...emb.points.map(p => p.x));
+      const embMaxX = Math.max(...emb.points.map(p => p.x));
+      const gamma = emb.props.gamma || 20;
       for (let x = embMinX; x <= embMaxX; x += embDx) {
         let y_ints = [];
-        embankments.forEach(emb => {
-          for (let i=0; i<emb.points.length; i++) {
-            let p1 = emb.points[i], p2 = emb.points[(i+1)%emb.points.length];
-            if ((p1.x <= x && p2.x >= x) || (p2.x <= x && p1.x >= x)) {
-              if (p1.x !== p2.x) y_ints.push(p1.y + (x - p1.x) * (p2.y - p1.y) / (p2.x - p1.x));
-              else y_ints.push(p1.y, p2.y);
-            }
+        for (let i=0; i<emb.points.length; i++) {
+          let p1 = emb.points[i], p2 = emb.points[(i+1)%emb.points.length];
+          if ((p1.x <= x && p2.x >= x) || (p2.x <= x && p1.x >= x)) {
+            if (p1.x !== p2.x) y_ints.push(p1.y + (x - p1.x) * (p2.y - p1.y) / (p2.x - p1.x));
+            else y_ints.push(p1.y, p2.y);
           }
-        });
+        }
         if (y_ints.length >= 2) {
           y_ints.sort((a,b) => a-b);
           let h = y_ints[y_ints.length - 1] - y_ints[0];
           let baseY = y_ints[0];
-          let gamma = embankments[0].props.gamma || 20;
           if (h > 0) embSlices.push({ x, baseY, q: h * gamma });
         }
       }
-    }
+    });
 
     const cols = Math.ceil((maxX - minX) / dx);
     const rows = Math.ceil((maxY - minY) / dy);
@@ -910,188 +914,261 @@ const App = () => {
     return { nx, ny, nz, minX, minY, minZ: 0, stepX, stepY, stepZ, cache };
   }, [stressData, pointLoads3D, committedElements, gwtLevel, projectSettings.length, bounds, rigidSettlements, get3DStressData_Exact, getColumnSettlement_Exact]);
 
+  // Επίλυση 3D στερεοποίησης: m_v·γw·∂u/∂t = ∇·(k ∇u)
+  // Πεπλεγμένο σχήμα (Backward Euler) σε συντηρητική μορφή: η ροή στις διεπιφάνειες
+  // στρώσεων υπολογίζεται με τον αρμονικό μέσο του k, οπότε διατηρείται η συνέχεια της ροής.
+  // Το σχήμα είναι ευσταθές για κάθε Δt, άρα δεν χρειάζεται περιορισμός του cv.
+  // Το γραμμικό σύστημα κάθε βήματος λύνεται με Συζυγείς Κλίσεις (PCG, Jacobi).
   const solveConsolidationPDE = useCallback(() => {
     if (!modelCache || !stressData) return;
     setIsSolvingTime(true);
     setSolveProgress(0);
     setActiveTimeIndex(-1);
-    
-    setTimeout(() => { 
-        const { nx, ny, nz, stepX, stepY, stepZ, minX, minY, minZ, cache } = modelCache;
-        const size = nx * ny * nz;
-        
-        const u = new Float32Array(cache.du); // υπερπίεση μόνο κάτω από τη Γ.Ο.Υ.
-        const cv = new Float32Array(size);
-        const ch = new Float32Array(size);
+
+    setTimeout(() => {
+        const { nx, ny, nz, stepX, stepY, stepZ, minX, minY, cache } = modelCache;
+        const nxy = nx * ny;
+        const size = nxy * nz;
+        const GAMMA_W = 9.81;
+
+        const u = new Float64Array(size);
+        const kv = new Float64Array(size);
+        const kh = new Float64Array(size);
+        const storage = new Float64Array(size); // γw·mv
         const isDrain = new Uint8Array(size);
 
-        let max_coef = 0;
-        
         for (let z=0; z<nz; z++) {
             for (let y=0; y<ny; y++) {
                 let wy = minY + y * stepY;
                 for (let x=0; x<nx; x++) {
                     let wx = minX + x * stepX;
-                    let idx = x + y*nx + z*nx*ny;
-                    
+                    let idx = x + y*nx + z*nxy;
+
                     let surfY = 0;
                     if (stressData.surfaceYArray) {
                        let c1 = Math.max(0, Math.min(stressData.cols - 1, Math.floor((wx - stressData.minX - stressData.dx/2) / stressData.dx)));
                        surfY = stressData.surfaceYArray[c1];
                     }
-                    
+
                     if (wy >= surfY - 0.1) {
-                        isDrain[idx] = 1; u[idx] = 0;
+                        isDrain[idx] = 1;
                     } else {
                         committedElements.forEach(el => {
                             if (el.type === 'drain') {
                                 for(let i=0; i<el.points.length-1; i++) {
                                     let d2 = distToSegmentSquared({x:wx, y:wy}, el.points[i], el.points[i+1]);
-                                    if (d2 < Math.max(stepX, stepY)**2) { isDrain[idx] = 1; u[idx] = 0; }
+                                    if (d2 < Math.max(stepX, stepY)**2) isDrain[idx] = 1;
                                 }
                             }
                         });
                     }
 
-                    let ky = 1e-9; let kh_kv = 1;
+                    let ky = 1e-9, kh_kv = 1, cc = 0.35, cs = 0.06, e0 = 0.9, ocr = 1.0, mu_sk = 1.0;
                     committedElements.forEach(el => {
                         if (el.type === 'layer' && isPointInPolygon({x:wx, y:wy}, el.points)) {
                             ky = el.props.ky || 1e-9;
                             kh_kv = el.props.kh_kv || 1;
+                            cc = el.props.cc ?? 0.35;
+                            cs = el.props.cs ?? 0.06;
+                            e0 = el.props.e0 ?? 0.9;
+                            ocr = el.props.ocr ?? 1.0;
+                            mu_sk = el.props.mu_skempton ?? 1.0;
                         }
                     });
+                    kv[idx] = ky;
+                    kh[idx] = ky * kh_kv;
 
+                    // mv: τέμνον από την τελική παραμόρφωση όπου υπάρχει φόρτιση,
+                    // αλλιώς εφαπτόμενο της καμπύλης e-log(p') στην αρχική τάση
                     let dsv = cache.dsv[idx];
                     let strainDec = cache.strain[idx] / 100;
-                    let mv = dsv > 1 ? strainDec / dsv : 1e-4;
-                    if (mv < 1e-6) mv = 1e-6; 
-                    
-                    let local_cv = ky / (9.81 * mv);
-                    local_cv = Math.min(Math.max(local_cv, 1e-10), 1e-4); 
-                    let local_ch = local_cv * kh_kv;
-                    
-                    cv[idx] = local_cv;
-                    ch[idx] = local_ch;
-                    
-                    let coef = local_ch/(stepX*stepX) + local_cv/(stepY*stepY) + local_ch/(stepZ*stepZ);
-                    if (coef > max_coef) max_coef = coef;
+                    let mv;
+                    if (dsv > 1 && strainDec > 0) {
+                        mv = strainDec / dsv;
+                    } else {
+                        const sv = Math.max(1, cache.sv0_eff[idx]);
+                        const C = ocr > 1 ? cs : cc;
+                        mv = mu_sk * 0.434 * C / ((1 + e0) * sv);
+                    }
+                    storage[idx] = GAMMA_W * Math.max(mv, 1e-7);
+
+                    u[idx] = isDrain[idx] ? 0 : cache.du[idx];
                 }
             }
         }
 
-        let dt = 0.3 / max_coef; 
-        let maxSec = timeSettings.maxYears * 365.25 * 86400;
-        let totalSteps = Math.ceil(maxSec / dt);
-        
-        if (totalSteps > 80000) {
-            dt = maxSec / 80000;
-            totalSteps = 80000;
+        // Αγωγιμότητες προς τον επόμενο κόμβο σε κάθε διεύθυνση (αρμονικός μέσος k / Δ²).
+        // Στα πλευρικά όρια και στον πυθμένα δεν υπάρχει όψη: μηδενική ροή (Neumann).
+        const harm = (a, b) => (a > 0 && b > 0) ? 2 * a * b / (a + b) : 0;
+        const cX = new Float64Array(size), cY = new Float64Array(size), cZ = new Float64Array(size);
+        const diagK = new Float64Array(size);
+        for (let z=0; z<nz; z++) {
+            for (let y=0; y<ny; y++) {
+                for (let x=0; x<nx; x++) {
+                    let i = x + y*nx + z*nxy;
+                    if (x < nx-1) { cX[i] = harm(kh[i], kh[i+1]) / (stepX*stepX); diagK[i] += cX[i]; diagK[i+1] += cX[i]; }
+                    if (y < ny-1) { cY[i] = harm(kv[i], kv[i+nx]) / (stepY*stepY); diagK[i] += cY[i]; diagK[i+nx] += cY[i]; }
+                    if (z < nz-1) { cZ[i] = harm(kh[i], kh[i+nxy]) / (stepZ*stepZ); diagK[i] += cZ[i]; diagK[i+nxy] += cZ[i]; }
+                }
+            }
         }
 
-        const numSnaps = timeSettings.snapshots;
-        const snaps = [];
-        let currentSec = 0;
-        let un = new Float32Array(u);
-        let un1 = new Float32Array(u);
+        const activeList = [];
+        for (let i=0; i<size; i++) if (!isDrain[i]) activeList.push(i);
+        const active = Int32Array.from(activeList);
 
-        let snapTargets = [];
-        const minLog = Math.log10(30 * 86400); 
-        const maxLog = Math.log10(maxSec);
-        for(let i=0; i<numSnaps; i++) {
-           snapTargets.push(Math.pow(10, minLog + i*(maxLog - minLog)/(numSnaps-1)));
-        }
-        let nextSnapIdx = 0;
-        let currentStep = 0;
-        const stepsPerFrame = 800; 
+        const r = new Float64Array(size), zv = new Float64Array(size), p = new Float64Array(size);
+        const Ap = new Float64Array(size), b = new Float64Array(size);
 
-        const computeFrame = () => {
-            let limit = Math.min(currentStep + stepsPerFrame, totalSteps);
-            for (; currentStep < limit; currentStep++) {
-                
-                for (let z=0; z<nz; z++) {
-                    for (let y=0; y<ny; y++) {
-                        for (let x=0; x<nx; x++) {
-                            let idx = x + y*nx + z*nx*ny;
-                            if (isDrain[idx]) { un1[idx] = 0; continue; }
-                            
-                            let uc = un[idx];
-                            let u_xM = x > 0 ? un[idx - 1] : un[idx + 1];
-                            let u_xP = x < nx-1 ? un[idx + 1] : un[idx - 1];
-                            let u_yM = y > 0 ? un[idx - nx] : un[idx + nx]; 
-                            let u_yP = y < ny-1 ? un[idx + nx] : un[idx - nx]; 
-                            let u_zM = z > 0 ? un[idx - nx*ny] : un[idx + nx*ny];
-                            let u_zP = z < nz-1 ? un[idx + nx*ny] : un[idx - nx*ny];
-
-                            let d2x = (u_xP - 2*uc + u_xM) / (stepX*stepX);
-                            let d2y = (u_yP - 2*uc + u_yM) / (stepY*stepY);
-                            let d2z = (u_zP - 2*uc + u_zM) / (stepZ*stepZ);
-
-                            let newVal = uc + dt * (ch[idx]*d2x + cv[idx]*d2y + ch[idx]*d2z);
-                            un1[idx] = newVal < 0 ? 0 : newVal;
-                        }
+        // out = (S/Δt + K)·v, με v = 0 στους κόμβους στράγγισης
+        const matvec = (v, out, invDt) => {
+            for (let z=0; z<nz; z++) {
+                for (let y=0; y<ny; y++) {
+                    let i = y*nx + z*nxy;
+                    for (let x=0; x<nx; x++, i++) {
+                        if (isDrain[i]) { out[i] = 0; continue; }
+                        let s = (storage[i] * invDt + diagK[i]) * v[i];
+                        if (x > 0) s -= cX[i-1] * v[i-1];
+                        if (x < nx-1) s -= cX[i] * v[i+1];
+                        if (y > 0) s -= cY[i-nx] * v[i-nx];
+                        if (y < ny-1) s -= cY[i] * v[i+nx];
+                        if (z > 0) s -= cZ[i-nxy] * v[i-nxy];
+                        if (z < nz-1) s -= cZ[i] * v[i+nxy];
+                        out[i] = s;
                     }
                 }
-                un.set(un1);
-                currentSec += dt;
+            }
+        };
 
-                if (nextSnapIdx < numSnaps && currentSec >= snapTargets[nextSnapIdx]) {
-                    let snapDu = new Float32Array(un);
-                    let snapStrain = new Float32Array(size);
-                    let snapSet = new Float32Array(size);
-                    let snapUz = new Float32Array(size);
-                    
-                    for (let ix=0; ix<nx; ix++) {
-                       for (let kz=0; kz<nz; kz++) {
-                          let verticalSet = 0;
-                          for (let jy=0; jy<ny; jy++) {
-                              let iIdx = ix + jy*nx + kz*nx*ny;
-                              let dsv0 = cache.dsv[iIdx];
-                              let u_t = snapDu[iIdx];
-                              let Uz = 0;
-                              if (dsv0 > 0.1) {
-                                  Uz = 1 - (u_t / dsv0);
-                                  if (Uz < 0) Uz = 0;
-                                  if (Uz > 1) Uz = 1;
-                                  snapUz[iIdx] = Uz * 100;
-                              } else { 
-                                  snapUz[iIdx] = 0; 
-                                  Uz = 1; 
-                              }
-                              
-                              // Απόλυτη ακρίβεια: Χρήση του ακριβούς ΔS από το base cache
-                              let exact_delta_S = 0;
-                              if (jy === 0) {
-                                  exact_delta_S = cache.settlement[iIdx];
-                              } else {
-                                  let prevIdx = ix + (jy-1)*nx + kz*nx*ny;
-                                  exact_delta_S = Math.max(0, cache.settlement[iIdx] - cache.settlement[prevIdx]);
-                              }
-                              
-                              verticalSet += exact_delta_S * Uz;
-                              snapSet[iIdx] = verticalSet;
-                              snapStrain[iIdx] = cache.strain[iIdx] * Uz;
-                          }
-                       }
-                    }
-                    
-                    snaps.push({ timeSec: snapTargets[nextSnapIdx], du: snapDu, strain: snapStrain, settlement: snapSet, Uz: snapUz });
+        // Ένα βήμα Backward Euler: (S/Δt + K)·u_new = S/Δt·u_old
+        const implicitStep = (dt) => {
+            const invDt = 1 / dt;
+            let bNorm2 = 0;
+            for (let k=0; k<active.length; k++) { const i = active[k]; b[i] = storage[i] * invDt * u[i]; bNorm2 += b[i]*b[i]; }
+            if (bNorm2 === 0) return;
+
+            matvec(u, Ap, invDt);
+            let rz = 0;
+            for (let k=0; k<active.length; k++) {
+                const i = active[k];
+                r[i] = b[i] - Ap[i];
+                zv[i] = r[i] / (storage[i] * invDt + diagK[i]);
+                p[i] = zv[i];
+                rz += r[i] * zv[i];
+            }
+            const tol2 = 1e-14 * bNorm2;
+            for (let it=0; it<2000; it++) {
+                let rr = 0;
+                for (let k=0; k<active.length; k++) { const i = active[k]; rr += r[i]*r[i]; }
+                if (rr <= tol2) break;
+
+                matvec(p, Ap, invDt);
+                let pAp = 0;
+                for (let k=0; k<active.length; k++) { const i = active[k]; pAp += p[i]*Ap[i]; }
+                const alpha = rz / pAp;
+                let rzNew = 0;
+                for (let k=0; k<active.length; k++) {
+                    const i = active[k];
+                    u[i] += alpha * p[i];
+                    r[i] -= alpha * Ap[i];
+                    zv[i] = r[i] / (storage[i] * invDt + diagK[i]);
+                    rzNew += r[i] * zv[i];
+                }
+                const beta = rzNew / rz;
+                rz = rzNew;
+                for (let k=0; k<active.length; k++) { const i = active[k]; p[i] = zv[i] + beta * p[i]; }
+            }
+            for (let k=0; k<active.length; k++) { const i = active[k]; if (u[i] < 0) u[i] = 0; }
+        };
+
+        const maxSec = timeSettings.maxYears * 365.25 * 86400;
+        const numSnaps = timeSettings.snapshots;
+        const snapTargets = [];
+        const minLog = Math.log10(30 * 86400);
+        const maxLog = Math.log10(maxSec);
+        for (let i=0; i<numSnaps; i++) {
+           snapTargets.push(Math.pow(10, minLog + i*(maxLog - minLog)/(numSnaps-1)));
+        }
+
+        // Χρονικά βήματα: λογαριθμικά πυκνά (STEPS_PER_DECADE ανά δεκάδα), συν τις ακριβείς
+        // στιγμές των στιγμιοτύπων, ώστε κάθε στιγμιότυπο να αντιστοιχεί ακριβώς στον χρόνο του
+        const STEPS_PER_DECADE = 30;
+        const t0 = Math.min(3600, snapTargets[0] / 10);
+        const allTimes = [...snapTargets];
+        for (let lt = Math.log10(t0); lt < maxLog; lt += 1 / STEPS_PER_DECADE) allTimes.push(Math.pow(10, lt));
+        allTimes.sort((a, b) => a - b);
+        const times = allTimes.filter((t, i) => i === 0 || t > allTimes[i-1] * (1 + 1e-9));
+
+        const snaps = [];
+        let nextSnapIdx = 0;
+        let stepIdx = 0;
+        let currentSec = 0;
+
+        const takeSnapshot = (timeSec) => {
+            let snapDu = Float32Array.from(u);
+            let snapStrain = new Float32Array(size);
+            let snapSet = new Float32Array(size);
+            let snapUz = new Float32Array(size);
+
+            for (let ix=0; ix<nx; ix++) {
+               for (let kz=0; kz<nz; kz++) {
+                  let verticalSet = 0;
+                  for (let jy=0; jy<ny; jy++) {
+                      let iIdx = ix + jy*nx + kz*nxy;
+                      let du0 = cache.du[iIdx];
+                      let Uz = 1;
+                      if (du0 > 0.1) {
+                          Uz = Math.max(0, Math.min(1, 1 - (snapDu[iIdx] / du0)));
+                          snapUz[iIdx] = Uz * 100;
+                      } else {
+                          // Χωρίς αρχική υπερπίεση (π.χ. πάνω από τη Γ.Ο.Υ.) η καθίζηση είναι άμεση
+                          snapUz[iIdx] = cache.dsv[iIdx] > 0.1 ? 100 : 0;
+                      }
+
+                      let exact_delta_S = 0;
+                      if (jy === 0) {
+                          exact_delta_S = cache.settlement[iIdx];
+                      } else {
+                          let prevIdx = ix + (jy-1)*nx + kz*nxy;
+                          exact_delta_S = Math.max(0, cache.settlement[iIdx] - cache.settlement[prevIdx]);
+                      }
+
+                      verticalSet += exact_delta_S * Uz;
+                      snapSet[iIdx] = verticalSet;
+                      snapStrain[iIdx] = cache.strain[iIdx] * Uz;
+                  }
+               }
+            }
+
+            snaps.push({ timeSec, du: snapDu, strain: snapStrain, settlement: snapSet, Uz: snapUz });
+        };
+
+        const computeFrame = () => {
+            const frameStart = performance.now();
+            while (stepIdx < times.length && performance.now() - frameStart < 40) {
+                const t = times[stepIdx];
+                implicitStep(t - currentSec);
+                currentSec = t;
+                stepIdx++;
+                while (nextSnapIdx < numSnaps && currentSec >= snapTargets[nextSnapIdx] * (1 - 1e-9)) {
+                    takeSnapshot(snapTargets[nextSnapIdx]);
                     nextSnapIdx++;
                 }
             }
 
-            setSolveProgress(Math.round((currentStep / totalSteps) * 100));
+            setSolveProgress(Math.round((stepIdx / times.length) * 100));
 
-            if (currentStep < totalSteps) {
-                setTimeout(computeFrame, 0); 
+            if (stepIdx < times.length) {
+                setTimeout(computeFrame, 0);
             } else {
                 setTimeSnapshots(snaps);
                 setActiveTimeIndex(snaps.length - 1);
                 setIsSolvingTime(false);
             }
         };
-        
+
         computeFrame();
-    }, 100); 
+    }, 100);
   }, [modelCache, stressData, timeSettings, committedElements]);
 
   const interpolate3D = useCallback((wx, wy, wz, dataArray) => {
@@ -1153,13 +1230,19 @@ const App = () => {
     if (activeStressLayer !== 'settlement') { if (wy > getSurfaceY(wx)) return null; }
     
     let dataArray = modelCache.cache[activeStressLayer];
-    if (activeTimeIndex >= 0 && timeSnapshots && timeSnapshots[activeTimeIndex]) {
-       if (activeStressLayer === 'du') dataArray = timeSnapshots[activeTimeIndex].du;
-       if (activeStressLayer === 'settlement') dataArray = timeSnapshots[activeTimeIndex].settlement;
-       if (activeStressLayer === 'strain') dataArray = timeSnapshots[activeTimeIndex].strain;
-       if (activeStressLayer === 'Uz') dataArray = timeSnapshots[activeTimeIndex].Uz;
+    const snap = activeTimeIndex >= 0 && timeSnapshots ? timeSnapshots[activeTimeIndex] : null;
+    if (snap) {
+       if (activeStressLayer === 'du') dataArray = snap.du;
+       if (activeStressLayer === 'settlement') dataArray = snap.settlement;
+       if (activeStressLayer === 'strain') dataArray = snap.strain;
+       if (activeStressLayer === 'Uz') dataArray = snap.Uz;
+       if (activeStressLayer === 'u_tot') return interpolate3D(wx, wy, wz, modelCache.cache.u0) + interpolate3D(wx, wy, wz, snap.du);
+    } else if (timeSnapshots && activeTimeIndex === -1) {
+       // Άπειρος χρόνος: η υπερπίεση έχει εκτονωθεί πλήρως
+       if (activeStressLayer === 'du') return 0;
+       if (activeStressLayer === 'u_tot') return interpolate3D(wx, wy, wz, modelCache.cache.u0);
     }
-    
+
     return interpolate3D(wx, wy, wz, dataArray);
   }, [modelCache, activeStressLayer, getSurfaceY, interpolate3D, activeTimeIndex, timeSnapshots]);
 
@@ -1171,8 +1254,6 @@ const App = () => {
     }
 
     let boundsArray = modelCache.cache[activeStressLayer];
-    if (activeStressLayer === 'du') boundsArray = modelCache.cache.dsv; 
-
     if (!boundsArray) return null;
     
     let minV = 0, maxV = 1;
@@ -1507,7 +1588,7 @@ const App = () => {
             if (wPos.y > surfY) return; // Εκτός εδάφους
 
             const initialStress = get3DStressData_Exact(wPos.x, wPos.y, profileZ);
-            const dsv0 = initialStress ? initialStress.dsv : 0;
+            const dsv0 = initialStress ? initialStress.du : 0; // αρχική υπερπίεση (0 πάνω από τη Γ.Ο.Υ.)
             
             const finalSettlement = interpolate3D(wPos.x, surfY, profileZ, modelCache.cache.settlement);
             
@@ -2340,7 +2421,7 @@ const finishPolygon = (e) => {
     }
 
     if (hasRealData && activeStressLayer !== 'none') { 
-      const { startVal, endVal, step, numIntervals } = colorScale;
+      const { startVal, step, numIntervals } = colorScale;
       const { x: lx, y: ly, h: lh } = legendState;
 
       const bandSize = lh / numIntervals;
@@ -2631,16 +2712,17 @@ const updateSelectedProp = (key, value) => {
                            {activeTimeIndex === -1 ? 'Άπειρος Χρόνος' : formatTime(timeSnapshots[activeTimeIndex].timeSec)}
                         </span>
                     </div>
-                    <input 
-                        type="range" 
-                        min="-1" 
-                        max={timeSnapshots.length - 1} 
-                        value={activeTimeIndex} 
-                        onChange={(e) => setActiveTimeIndex(Number(e.target.value))} 
-                        className="w-full accent-amber-600 cursor-pointer" 
+                    {/* Θέσεις 0..n-1: στιγμιότυπα, τελευταία θέση (n): άπειρος χρόνος (activeTimeIndex = -1) */}
+                    <input
+                        type="range"
+                        min="0"
+                        max={timeSnapshots.length}
+                        value={activeTimeIndex === -1 ? timeSnapshots.length : activeTimeIndex}
+                        onChange={(e) => { const v = Number(e.target.value); setActiveTimeIndex(v === timeSnapshots.length ? -1 : v); }}
+                        className="w-full accent-amber-600 cursor-pointer"
                     />
                     <div className="flex justify-between text-[10px] text-slate-500 mt-1 font-medium">
-                        <span>Αρχική (t=0)</span>
+                        <span>{formatTime(timeSnapshots[0].timeSec)}</span>
                         <span>{timeSettings.maxYears} Έτη</span>
                         <span>Άπειρο</span>
                     </div>
@@ -2786,13 +2868,13 @@ const updateSelectedProp = (key, value) => {
                       <label className="block text-xs text-gray-500 mb-1" title={selectedElement.type.includes('load') ? 'Εικονικό γ για υπολογισμό ύψους αναπαράστασης' : ''}>
                         {selectedElement.type.includes('load') ? 'Εικονικό γ' : 'γ (kN/m³)'}
                       </label>
-                      <input type="number" value={selectedElement.props.gamma || ''} onChange={(e) => updateSelectedProp('gamma', Number(e.target.value))} className="w-full p-2 text-sm border border-gray-300 rounded" step="0.5" />
+                      <input type="number" value={selectedElement.props.gamma ?? ''} onChange={(e) => updateSelectedProp('gamma', Number(e.target.value))} className="w-full p-2 text-sm border border-gray-300 rounded" step="0.5" />
                     </div>
                   )}
                   {(selectedElement.type === 'rect_load' || selectedElement.type === 'circle_load') && (
                     <div className="flex-1">
                       <label className="block text-xs text-gray-500 mb-1">Φορτίο q (kPa)</label>
-                      <input type="number" value={selectedElement.props.q || ''} onChange={(e) => updateSelectedProp('q', Number(e.target.value))} className="w-full p-2 text-sm border border-gray-300 rounded" step="5" />
+                      <input type="number" value={selectedElement.props.q ?? ''} onChange={(e) => updateSelectedProp('q', Number(e.target.value))} className="w-full p-2 text-sm border border-gray-300 rounded" step="5" />
                     </div>
                   )}
                 </div>
@@ -2802,21 +2884,21 @@ const updateSelectedProp = (key, value) => {
                     <div className="grid grid-cols-2 gap-2">
                       <div>
                         <label className="block text-xs text-gray-500 mb-1">e0 (Κενό)</label>
-                        <input type="number" value={selectedElement.props.e0 || ''} onChange={(e) => updateSelectedProp('e0', Number(e.target.value))} className="w-full p-2 text-sm border border-gray-300 rounded" step="0.05" />
+                        <input type="number" value={selectedElement.props.e0 ?? ''} onChange={(e) => updateSelectedProp('e0', Number(e.target.value))} className="w-full p-2 text-sm border border-gray-300 rounded" step="0.05" />
                       </div>
                       <div>
                         <label className="block text-xs text-gray-500 mb-1">Cc (Συμπ.)</label>
-                        <input type="number" value={selectedElement.props.cc || ''} onChange={(e) => updateSelectedProp('cc', Number(e.target.value))} className="w-full p-2 text-sm border border-gray-300 rounded" step="0.05" />
+                        <input type="number" value={selectedElement.props.cc ?? ''} onChange={(e) => updateSelectedProp('cc', Number(e.target.value))} className="w-full p-2 text-sm border border-gray-300 rounded" step="0.05" />
                       </div>
                     </div>
                     <div className="grid grid-cols-3 gap-2">
                       <div>
                         <label className="block text-xs text-gray-500 mb-1">Cs (Διόγκ.)</label>
-                        <input type="number" value={selectedElement.props.cs || ''} onChange={(e) => updateSelectedProp('cs', Number(e.target.value))} className="w-full p-2 text-sm border border-gray-300 rounded" step="0.01" />
+                        <input type="number" value={selectedElement.props.cs ?? ''} onChange={(e) => updateSelectedProp('cs', Number(e.target.value))} className="w-full p-2 text-sm border border-gray-300 rounded" step="0.01" />
                       </div>
                       <div>
                         <label className="block text-xs text-gray-500 mb-1" title="Λόγος Υπερστερεοποίησης">OCR</label>
-                        <input type="number" value={selectedElement.props.ocr || ''} onChange={(e) => updateSelectedProp('ocr', Number(e.target.value))} className="w-full p-2 text-sm border border-gray-300 rounded" step="0.1" min="1" />
+                        <input type="number" value={selectedElement.props.ocr ?? ''} onChange={(e) => updateSelectedProp('ocr', Number(e.target.value))} className="w-full p-2 text-sm border border-gray-300 rounded" step="0.1" min="1" />
                       </div>
                       <div>
                         <label className="block text-xs text-gray-500 mb-1" title="Παράμετρος μ Skempton">Skempton μ</label>
@@ -2830,7 +2912,7 @@ const updateSelectedProp = (key, value) => {
                       </div>
                       <div>
                         <label className="block text-xs text-gray-500 mb-1" title="Λόγος Οριζόντιας προς Κατακόρυφη">k,hor / k,vert</label>
-                        <input type="number" value={selectedElement.props.kh_kv || ''} onChange={(e) => updateSelectedProp('kh_kv', Number(e.target.value))} className="w-full p-2 text-sm border border-gray-300 rounded [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none" placeholder="Λόγος" />
+                        <input type="number" value={selectedElement.props.kh_kv ?? ''} onChange={(e) => updateSelectedProp('kh_kv', Number(e.target.value))} className="w-full p-2 text-sm border border-gray-300 rounded [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none" placeholder="Λόγος" />
                       </div>
                     </div>
                   </div>
@@ -2838,15 +2920,15 @@ const updateSelectedProp = (key, value) => {
                 
                 {selectedElement.type === 'rect_load' && (
                   <div className="grid grid-cols-2 gap-2 pt-2 border-t border-gray-100 mt-4">
-                    <div><label className="block text-xs text-gray-500 mb-1">Πλάτος X (m)</label><input type="number" value={selectedElement.props.width || ''} onChange={(e) => updateSelectedProp('width', Number(e.target.value))} className="w-full p-2 text-sm border border-gray-300 rounded" step="1" /></div>
-                    <div><label className="block text-xs text-gray-500 mb-1">Μήκος Z (m)</label><input type="number" value={selectedElement.props.length || ''} onChange={(e) => updateSelectedProp('length', Number(e.target.value))} className="w-full p-2 text-sm border border-gray-300 rounded" step="1" /></div>
+                    <div><label className="block text-xs text-gray-500 mb-1">Πλάτος X (m)</label><input type="number" value={selectedElement.props.width ?? ''} onChange={(e) => updateSelectedProp('width', Number(e.target.value))} className="w-full p-2 text-sm border border-gray-300 rounded" step="1" /></div>
+                    <div><label className="block text-xs text-gray-500 mb-1">Μήκος Z (m)</label><input type="number" value={selectedElement.props.length ?? ''} onChange={(e) => updateSelectedProp('length', Number(e.target.value))} className="w-full p-2 text-sm border border-gray-300 rounded" step="1" /></div>
                   </div>
                 )}
                 
                 {selectedElement.type === 'circle_load' && (
                   <div className="pt-2 border-t border-gray-100 mt-4">
                     <label className="block text-xs text-gray-500 mb-1">Ακτίνα R (m)</label>
-                    <input type="number" value={selectedElement.props.radius || ''} onChange={(e) => updateSelectedProp('radius', Number(e.target.value))} className="w-full p-2 text-sm border border-gray-300 rounded" step="0.5" />
+                    <input type="number" value={selectedElement.props.radius ?? ''} onChange={(e) => updateSelectedProp('radius', Number(e.target.value))} className="w-full p-2 text-sm border border-gray-300 rounded" step="0.5" />
                   </div>
                 )}
 
@@ -2871,17 +2953,17 @@ const updateSelectedProp = (key, value) => {
                 {selectedElement.type === 'embankment_3d' && (
                   <div className="space-y-2 pt-2 border-t border-gray-100 mt-4">
                     <div className="grid grid-cols-2 gap-2">
-                      <div><label className="block text-[10px] text-gray-500 mb-1">Πλάτος Βάσης X</label><input type="number" value={selectedElement.props.baseW || ''} onChange={(e) => updateSelectedProp('baseW', Number(e.target.value))} className="w-full p-2 text-sm border border-gray-300 rounded" step="1" /></div>
-                      <div><label className="block text-[10px] text-gray-500 mb-1">Μήκος Βάσης Z</label><input type="number" value={selectedElement.props.baseL || ''} onChange={(e) => updateSelectedProp('baseL', Number(e.target.value))} className="w-full p-2 text-sm border border-gray-300 rounded" step="1" /></div>
+                      <div><label className="block text-[10px] text-gray-500 mb-1">Πλάτος Βάσης X</label><input type="number" value={selectedElement.props.baseW ?? ''} onChange={(e) => updateSelectedProp('baseW', Number(e.target.value))} className="w-full p-2 text-sm border border-gray-300 rounded" step="1" /></div>
+                      <div><label className="block text-[10px] text-gray-500 mb-1">Μήκος Βάσης Z</label><input type="number" value={selectedElement.props.baseL ?? ''} onChange={(e) => updateSelectedProp('baseL', Number(e.target.value))} className="w-full p-2 text-sm border border-gray-300 rounded" step="1" /></div>
                     </div>
                     <div className="grid grid-cols-2 gap-2">
                       <div>
                         <label className="block text-xs text-gray-500 mb-1">Ύψος (m)</label>
-                        <input type="number" value={selectedElement.props.height || ''} onChange={(e) => updateSelectedProp('height', Number(e.target.value))} className="w-full p-2 text-sm border border-gray-300 rounded" step="1" />
+                        <input type="number" value={selectedElement.props.height ?? ''} onChange={(e) => updateSelectedProp('height', Number(e.target.value))} className="w-full p-2 text-sm border border-gray-300 rounded" step="1" />
                       </div>
                       <div>
                         <label className="block text-xs text-gray-500 mb-1">Κλίση (V:1H)</label>
-                        <input type="number" value={selectedElement.props.slopeV || ''} onChange={(e) => updateSelectedProp('slopeV', Number(e.target.value))} className="w-full p-2 text-sm border border-gray-300 rounded" step="0.5" min="0.1" />
+                        <input type="number" value={selectedElement.props.slopeV ?? ''} onChange={(e) => updateSelectedProp('slopeV', Number(e.target.value))} className="w-full p-2 text-sm border border-gray-300 rounded" step="0.5" min="0.1" />
                       </div>
                     </div>
                   </div>
