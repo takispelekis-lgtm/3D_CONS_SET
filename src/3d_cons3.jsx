@@ -848,7 +848,10 @@ const App = () => {
     if (!stressData || committedElements.length === 0) return null;
     const { minX, maxX, minY, maxY } = bounds;
     const maxZ = projectSettings.length;
-    const nx = 31, ny = 21, nz = 31; 
+    // Πυκνότερος κάνναβος κατά το βάθος: κοντά στα όρια στράγγισης η υπερπίεση μεταβάλλεται
+    // απότομα στους πρώτους χρόνους, και ο μισός όγκος ελέγχου του κόμβου στράγγισης
+    // στερεοποιείται αμέσως, οπότε το βήμα Δy καθορίζει την πλασματική αρχική καθίζηση
+    const nx = 31, ny = 41, nz = 31;
     const stepX = (maxX - minX) / (nx - 1) || 1;
     const stepY = (maxY - minY) / (ny - 1) || 1;
     const stepZ = maxZ / (nz - 1) || 1;
