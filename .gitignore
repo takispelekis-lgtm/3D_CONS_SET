@@ -10,6 +10,9 @@ lerna-debug.log*
 node_modules
 dist
 
+# Προσωπικές ρυθμίσεις του Claude Code (δεν ανεβαίνουν στο GitHub)
+.claude/settings.local.json
+
 # Βοηθητικά αρχεία μεταγλώττισης του εγχειριδίου (το τελικό PDF είναι στη ρίζα)
 docs/manual/*.aux
 docs/manual/*.out

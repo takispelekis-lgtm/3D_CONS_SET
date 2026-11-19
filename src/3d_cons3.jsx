@@ -218,132 +218,193 @@ const ELogPChart = ({ data }) => {
 // Αρχή του λογαριθμικού άξονα χρόνου στο διάγραμμα (ημέρες): εκεί σημειώνεται η αρχική κατάσταση
 const TIME_PLOT_MIN_DAYS = 0.1;
 
-// Component Γράφημα Εξέλιξης Χρόνου (Time Plot)
-const TimePlotChart = ({ data, finalSettlement }) => {
-  const [hoverIdx, setHoverIdx] = useState(null);
+// Άξονας με «στρογγυλό» βήμα (1, 2, 2.5, 5 × 10ⁿ) από το 0 έως πάνω από το maxVal
+const niceAxis = (maxVal, targetTicks = 4) => {
+  const top = maxVal > 0 ? maxVal : 1;
+  const raw = top / targetTicks;
+  const p = Math.pow(10, Math.floor(Math.log10(raw)));
+  const n = raw / p;
+  const step = (n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10) * p;
+  const max = Math.max(step, Math.ceil(top / step - 1e-9) * step);
+  const ticks = [];
+  for (let v = 0; v <= max + step * 1e-6; v += step) ticks.push(v);
+  return { max, ticks, dec: step >= 1 ? 0 : step >= 0.1 ? 1 : 2 };
+};
 
+const TIME_PLOT_COLORS = { S: '#9333ea', du: '#dc2626', U: '#16a34a', Uz: '#0d9488' };
+
+// Διάγραμμα εξέλιξης στον χρόνο σε ένα σημείο: τρία διαγράμματα με κοινό λογαριθμικό
+// άξονα χρόνου. Η καθίζηση και ο βαθμός στερεοποίησης αυξάνουν προς τα κάτω, όπως
+// συνηθίζεται στα διαγράμματα καθίζησης-χρόνου.
+const TimePlotChart = ({ plot }) => {
+  const [hoverIdx, setHoverIdx] = useState(null);
+  const data = plot?.data;
   if (!data || data.length === 0) return null;
-  const w = 600, h = 300;
-  const padL = 50, padR = 50, padT = 20, padB = 40;
+
+  const w = 640, padL = 64, padR = 18, padT = 10, panelH = 118, gap = 30, padB = 44;
+  const h = padT + 3 * panelH + 2 * gap + padB;
+  const plotW = w - padL - padR;
+  const panelTop = (k) => padT + k * (panelH + gap);
 
   const minDays = TIME_PLOT_MIN_DAYS;
   const maxDays = Math.max(10, data[data.length - 1].timeSec / 86400);
   const minLog = Math.log10(minDays);
   const maxLog = Math.ceil(Math.log10(maxDays) - 1e-9); // ο άξονας τελειώνει σε ακέραια δεκάδα
-  
-  let maxS = finalSettlement ? Math.max(1, finalSettlement) : 1;
-  data.forEach(p => { if (p.settlement > maxS) maxS = p.settlement; });
-  maxS = Math.ceil(maxS / 10) * 10; 
+  const getX = (sec) => padL + plotW * ((Math.log10(Math.max(minDays, sec / 86400)) - minLog) / (maxLog - minLog));
 
-  const getX = (days) => padL + (w - padL - padR) * ((Math.log10(Math.max(minDays, days)) - minLog) / (maxLog - minLog));
-  const getY1 = (pct) => padT + (h - padT - padB) * (1 - pct / 100);
-  const getY2 = (s) => padT + (h - padT - padB) * (1 - s / maxS);
-  
-  const uzLine = data.map(p => `${getX(p.timeSec / 86400)},${getY1(p.uz_pct)}`).join(' ');
-  const duLine = data.map(p => `${getX(p.timeSec / 86400)},${getY1(p.du_pct)}`).join(' ');
-  const sLine = data.map(p => `${getX(p.timeSec / 86400)},${getY2(p.settlement)}`).join(' ');
+  const sAxis = niceAxis(Math.max(plot.S_inf, ...data.map(p => p.S)));
+  const duAxis = niceAxis(Math.max(plot.du0, ...data.map(p => p.du)));
+  const uAxis = { max: 100, ticks: [0, 25, 50, 75, 100], dec: 0 };
+  const hasDu = plot.du0 > 0.1;
+
+  // Πάνελ: κλειδί δεδομένων, άξονας, φορά (down = το 0 πάνω), τίτλος άξονα
+  const panels = [
+    { key: 'S', axis: sAxis, down: true, title: 'Καθίζηση S (mm)' },
+    { key: 'du', axis: duAxis, down: false, title: 'Υπερπίεση Δu (kPa)' },
+    { key: 'U', axis: uAxis, down: true, title: 'Βαθμός U (%)' },
+  ];
+  const getY = (k, v) => {
+    const { axis, down } = panels[k];
+    const r = Math.max(0, Math.min(1, v / axis.max));
+    return panelTop(k) + panelH * (down ? r : 1 - r);
+  };
+  const line = (k, key) => data.map(p => `${getX(p.timeSec)},${getY(k, p[key])}`).join(' ');
 
   const xTicks = [];
-  for (let p = Math.round(minLog); p <= maxLog; p++) {
-       xTicks.push({ val: Math.pow(10, p), power: p });
-  }
+  for (let p = Math.round(minLog); p <= maxLog; p++) xTicks.push({ val: Math.pow(10, p), power: p });
 
   const handleMouseMove = (e) => {
-      const rect = e.currentTarget.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      if (x < padL || x > w - padR) {
-          setHoverIdx(null);
-          return;
-      }
-      const pctX = (x - padL) / (w - padL - padR);
-      const logT = minLog + pctX * (maxLog - minLog);
-      
-      let closestIdx = 0;
-      let minDiff = Infinity;
-      for (let i = 0; i < data.length; i++) {
-          const ptLogT = Math.log10(Math.max(minDays, data[i].timeSec / 86400));
-          const diff = Math.abs(ptLogT - logT);
-          if (diff < minDiff) {
-              minDiff = diff;
-              closestIdx = i;
-          }
-      }
-      setHoverIdx(closestIdx);
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = (e.clientX - rect.left) * (w / rect.width);
+    if (x < padL - 4 || x > w - padR + 4) { setHoverIdx(null); return; }
+    const logT = minLog + ((x - padL) / plotW) * (maxLog - minLog);
+    let best = 0, bestDiff = Infinity;
+    data.forEach((p, i) => {
+      const diff = Math.abs(Math.log10(Math.max(minDays, p.timeSec / 86400)) - logT);
+      if (diff < bestDiff) { bestDiff = diff; best = i; }
+    });
+    setHoverIdx(best);
   };
 
+  const pt = hoverIdx !== null ? data[hoverIdx] : null;
+
   return (
-      <svg 
-          width={w} 
-          height={h} 
-          className="text-xs font-sans cursor-crosshair" 
-          onMouseMove={handleMouseMove} 
-          onMouseLeave={() => setHoverIdx(null)}
-      >
-          {/* Grid lines */}
-          {xTicks.map((t, i) => <line key={`gx-${i}`} x1={getX(t.val)} y1={padT} x2={getX(t.val)} y2={h-padB} stroke="#e2e8f0" strokeWidth={1} />)}
-          {[0, 25, 50, 75, 100].map(v => <line key={`gy1-${v}`} x1={padL} y1={getY1(v)} x2={w-padR} y2={getY1(v)} stroke="#e2e8f0" strokeWidth={1} />)}
-          
-          {/* Axes */}
-          <line x1={padL} y1={h-padB} x2={w-padR} y2={h-padB} stroke="#1e293b" strokeWidth={1.5} />
-          <line x1={padL} y1={h-padB} x2={padL} y2={padT} stroke="#1e293b" strokeWidth={1.5} />
-          <line x1={w-padR} y1={h-padB} x2={w-padR} y2={padT} stroke="#1e293b" strokeWidth={1.5} />
+    <svg width={w} height={h} className="text-xs font-sans cursor-crosshair select-none" onMouseMove={handleMouseMove} onMouseLeave={() => setHoverIdx(null)}>
+      {panels.map((pn, k) => {
+        const top = panelTop(k);
+        return (
+          <g key={pn.key}>
+            <rect x={padL} y={top} width={plotW} height={panelH} fill="#ffffff" stroke="#cbd5e1" />
+            {xTicks.map((t, i) => <line key={i} x1={getX(t.val * 86400)} y1={top} x2={getX(t.val * 86400)} y2={top + panelH} stroke="#e2e8f0" />)}
+            {pn.axis.ticks.map(v => (
+              <g key={v}>
+                <line x1={padL} y1={getY(k, v)} x2={w - padR} y2={getY(k, v)} stroke="#e2e8f0" />
+                <text x={padL - 6} y={getY(k, v) + 3.5} textAnchor="end" fill="#334155">{v.toFixed(pn.axis.dec)}</text>
+              </g>
+            ))}
+            <text x={16} y={top + panelH / 2} textAnchor="middle" fill="#0f172a" fontWeight="bold" transform={`rotate(-90 16 ${top + panelH / 2})`}>{pn.title}</text>
+          </g>
+        );
+      })}
 
-          {/* Labels X */}
-          {xTicks.map((t, i) => (
-             <text key={`lx-${i}`} x={getX(t.val)} y={h-padB + 18} textAnchor="middle" fill="#334155" fontWeight="bold">{t.power < 0 ? t.val.toFixed(-t.power) : t.val}</text>
-          ))}
-          <text x={w/2} y={h-padB + 36} textAnchor="middle" fill="#0f172a" fontWeight="bold">Χρόνος (Ημέρες - Log Scale)</text>
+      {/* Τελική καθίζηση S∞ */}
+      {plot.S_inf > 0 && (
+        <g>
+          <line x1={padL} y1={getY(0, plot.S_inf)} x2={w - padR} y2={getY(0, plot.S_inf)} stroke={TIME_PLOT_COLORS.S} strokeDasharray="4 4" />
+          <text x={padL + 6} y={getY(0, plot.S_inf) - 5} fill={TIME_PLOT_COLORS.S} fontWeight="bold">S∞ = {plot.S_inf.toFixed(1)} mm</text>
+        </g>
+      )}
 
-          {/* Labels Y1 (%) */}
-          {[0, 25, 50, 75, 100].map(v => (
-             <text key={`ly1-${v}`} x={padL - 8} y={getY1(v) + 4} textAnchor="end" fill="#334155" fontWeight="bold">{v}%</text>
-          ))}
-          
-          {/* Labels Y2 (mm) */}
-          {[0, 0.25, 0.5, 0.75, 1].map(frac => {
-             const v = maxS * frac;
-             return <text key={`ly2-${v}`} x={w - padR + 8} y={getY2(v) + 4} textAnchor="start" fill="#9333ea" fontWeight="bold">{v.toFixed(0)}</text>;
-          })}
-          
-          {finalSettlement > 0 && (
-             <>
-                 <line x1={padL} y1={getY2(finalSettlement)} x2={w-padR} y2={getY2(finalSettlement)} stroke="#9333ea" strokeWidth={1.5} strokeDasharray="4 4" />
-                 <text x={w - padR - 8} y={getY2(finalSettlement) - 8} textAnchor="end" fill="#9333ea" fontWeight="bold">S∞={finalSettlement.toFixed(1)}</text>
-             </>
-          )}
+      {/* Καμπύλες */}
+      <polyline points={line(0, 'S')} fill="none" stroke={TIME_PLOT_COLORS.S} strokeWidth={2.5} />
+      <polyline points={line(1, 'du')} fill="none" stroke={TIME_PLOT_COLORS.du} strokeWidth={2.5} />
+      {hasDu && <polyline points={line(2, 'Uz')} fill="none" stroke={TIME_PLOT_COLORS.Uz} strokeWidth={2} strokeDasharray="6 4" />}
+      <polyline points={line(2, 'U')} fill="none" stroke={TIME_PLOT_COLORS.U} strokeWidth={2.5} />
+      {!hasDu && <text x={padL + plotW / 2} y={panelTop(1) + panelH / 2} textAnchor="middle" fill="#64748b">Χωρίς αρχική υπερπίεση στο σημείο (πάνω από τη Γ.Ο.Υ. ή εκτός φόρτισης)</text>}
 
-          {/* Lines */}
-          <polyline points={uzLine} fill="none" stroke="#16a34a" strokeWidth={3} />
-          <polyline points={duLine} fill="none" stroke="#dc2626" strokeWidth={3} strokeDasharray="5 5" />
-          <polyline points={sLine} fill="none" stroke="#9333ea" strokeWidth={3} />
+      {/* Άξονας χρόνου */}
+      {xTicks.map((t, i) => (
+        <text key={i} x={getX(t.val * 86400)} y={h - padB + 16} textAnchor="middle" fill="#334155" fontWeight="bold">{t.power < 0 ? t.val.toFixed(-t.power) : t.val}</text>
+      ))}
+      <text x={padL + plotW / 2} y={h - 10} textAnchor="middle" fill="#0f172a" fontWeight="bold">Χρόνος t (ημέρες, λογαριθμική κλίμακα)</text>
 
-          {/* Hover Tooltip & Crosshair */}
-          {hoverIdx !== null && (() => {
-              const pt = data[hoverIdx];
-              const hx = getX(pt.timeSec / 86400);
-              const isRight = hx > w / 2;
-              const boxW = 125;
-              const boxH = 75;
-              const bX = isRight ? hx - boxW - 15 : hx + 15;
-              const bY = padT;
+      {/* Σταυρόνημα και τιμές στη θέση του ποντικιού */}
+      {pt && (() => {
+        const hx = getX(pt.timeSec);
+        const boxW = 150, boxH = 84;
+        const bX = hx > padL + plotW / 2 ? hx - boxW - 10 : hx + 10;
+        const bY = panelTop(0) + 4;
+        const rows = [
+          { c: '#1e293b', t: `t: ${pt.isInitial ? '0 (αρχική)' : formatTime(pt.timeSec)}` },
+          { c: TIME_PLOT_COLORS.S, t: `S: ${pt.S.toFixed(1)} mm` },
+          { c: TIME_PLOT_COLORS.du, t: `Δu: ${pt.du.toFixed(1)} kPa` },
+          { c: TIME_PLOT_COLORS.U, t: `U: ${pt.U.toFixed(1)} %${hasDu ? `   Uz: ${pt.Uz.toFixed(1)} %` : ''}` },
+        ];
+        return (
+          <g className="pointer-events-none">
+            <line x1={hx} y1={panelTop(0)} x2={hx} y2={panelTop(2) + panelH} stroke="#334155" strokeDasharray="3 3" />
+            <circle cx={hx} cy={getY(0, pt.S)} r={4} fill={TIME_PLOT_COLORS.S} stroke="#fff" strokeWidth={1.5} />
+            <circle cx={hx} cy={getY(1, pt.du)} r={4} fill={TIME_PLOT_COLORS.du} stroke="#fff" strokeWidth={1.5} />
+            <circle cx={hx} cy={getY(2, pt.U)} r={4} fill={TIME_PLOT_COLORS.U} stroke="#fff" strokeWidth={1.5} />
+            {hasDu && <circle cx={hx} cy={getY(2, pt.Uz)} r={3.5} fill={TIME_PLOT_COLORS.Uz} stroke="#fff" strokeWidth={1.5} />}
+            <rect x={bX} y={bY} width={boxW} height={boxH} fill="white" stroke="#cbd5e1" rx={4} fillOpacity={0.96} />
+            {rows.map((r, i) => <text key={i} x={bX + 8} y={bY + 17 + i * 18} fill={r.c} fontWeight="bold">{r.t}</text>)}
+          </g>
+        );
+      })()}
+    </svg>
+  );
+};
 
-              return (
-                  <g className="pointer-events-none">
-                      <line x1={hx} y1={padT} x2={hx} y2={h-padB} stroke="#334155" strokeWidth={1} strokeDasharray="3 3" />
-                      
-                      <circle cx={hx} cy={getY1(pt.uz_pct)} r={4} fill="#16a34a" stroke="#fff" strokeWidth={1.5} />
-                      <circle cx={hx} cy={getY1(pt.du_pct)} r={4} fill="#dc2626" stroke="#fff" strokeWidth={1.5} />
-                      <circle cx={hx} cy={getY2(pt.settlement)} r={4} fill="#9333ea" stroke="#fff" strokeWidth={1.5} />
+// Ονομασία και μονάδα κάθε απεικονιζόμενου μεγέθους
+const RESULT_LAYERS = {
+  sv0: { name: 'Αρχική ολική τάση σv0', unit: 'kPa' },
+  u0: { name: 'Υδροστατική πίεση u0', unit: 'kPa' },
+  sv0_eff: { name: "Αρχική ενεργός τάση σ'v0", unit: 'kPa' },
+  dsv: { name: 'Αύξηση τάσης Δσv', unit: 'kPa' },
+  du: { name: 'Υπερπίεση πόρων Δu', unit: 'kPa' },
+  u_tot: { name: 'Συνολική πίεση πόρων u', unit: 'kPa' },
+  settlement: { name: 'Καθίζηση S', unit: 'mm' },
+  strain: { name: 'Κατακόρυφη παραμόρφωση εy', unit: '%' },
+  Uz: { name: 'Βαθμός στερεοποίησης Uz', unit: '%' },
+};
+const TIME_DEPENDENT_LAYERS = ['du', 'u_tot', 'settlement', 'strain', 'Uz'];
 
-                      <rect x={bX} y={bY} width={boxW} height={boxH} fill="white" stroke="#cbd5e1" rx={4} ry={4} fillOpacity={0.95} />
-                      <text x={bX + 8} y={bY + 18} fill="#1e293b" fontWeight="bold">t: {pt.isInitial ? '0 (αρχική)' : formatTime(pt.timeSec)}</text>
-                      <text x={bX + 8} y={bY + 34} fill="#dc2626" fontWeight="bold">Δu: {pt.du_pct.toFixed(1)}%</text>
-                      <text x={bX + 8} y={bY + 50} fill="#16a34a" fontWeight="bold">Uz: {pt.uz_pct.toFixed(1)}%</text>
-                      <text x={bX + 8} y={bY + 66} fill="#9333ea" fontWeight="bold">S: {pt.settlement.toFixed(1)} mm</text>
-                  </g>
-              );
-          })()}
-      </svg>
+// Απόχρωση της χρωματικής κλίμακας για λόγο 0…1: μπλε → κόκκινο (αντίστροφα για το Uz)
+const scaleHue = (ratio, layer) => (layer === 'Uz' ? ratio : 1 - ratio) * 240;
+
+// Υπόμνημα της χρωματικής κλίμακας, σταθερό στην κορυφή του δεξιού πάνελ
+const ColorLegend = ({ colorScale, layer, heatmapStyle, stateLabel }) => {
+  const { startVal, step, numIntervals } = colorScale;
+  const info = RESULT_LAYERS[layer] || { name: layer, unit: '' };
+  const dec = step >= 1 ? 0 : step >= 0.1 ? 1 : 2;
+  const color = (ratio) => `hsl(${scaleHue(ratio, layer)}, 100%, 50%)`;
+  // Ίδια χρώματα με τον καμβά: ζώνες από τον πίνακα χρωμάτων, συνεχής κλίμακα για το «Συνεχές»
+  const bands = Array.from({ length: numIntervals }, (_, i) => color(numIntervals > 1 ? i / (numIntervals - 1) : 0.5));
+  const gradient = `linear-gradient(to right, ${Array.from({ length: numIntervals + 1 }, (_, i) => `${color(i / numIntervals)} ${(100 * i / numIntervals).toFixed(2)}%`).join(', ')})`;
+  // Αραίωση των ετικετών όταν οι ζώνες είναι πολλές, ώστε να μην επικαλύπτονται
+  const every = numIntervals > 12 ? 3 : numIntervals > 6 ? 2 : 1;
+  const labelIdx = Array.from({ length: numIntervals + 1 }, (_, i) => i)
+    .filter(i => i === numIntervals || (i % every === 0 && numIntervals - i >= every));
+
+  return (
+    <div className="px-4 pt-3 pb-2 border-b border-gray-200 bg-white shrink-0 shadow-sm">
+      <div className="flex justify-between items-baseline gap-2">
+        <span className="text-sm font-bold text-slate-800 truncate" title={info.name}>{info.name}</span>
+        <span className="text-xs font-semibold text-slate-500 shrink-0">{info.unit}</span>
+      </div>
+      {stateLabel && <div className="text-[11px] text-slate-500">{stateLabel}</div>}
+      <div className="mt-1.5 h-4 rounded-sm border border-slate-400 overflow-hidden flex" style={heatmapStyle === 'smooth' ? { background: gradient } : undefined}>
+        {heatmapStyle !== 'smooth' && bands.map((c, i) => <div key={i} className="flex-1" style={{ background: c }} />)}
+      </div>
+      <div className="relative h-4 mt-0.5 text-[10px] font-mono font-semibold text-slate-700">
+        {labelIdx.map(i => (
+          <span key={i} className="absolute top-0 whitespace-nowrap" style={{ left: `${100 * i / numIntervals}%`, transform: i === 0 ? 'none' : i === numIntervals ? 'translateX(-100%)' : 'translateX(-50%)' }}>
+            {(startVal + i * step).toFixed(dec)}
+          </span>
+        ))}
+      </div>
+    </div>
   );
 };
 
@@ -417,7 +478,8 @@ const App = () => {
   const [timePlotData, setTimePlotData] = useState(null); 
 
   const [gwtLevel, setGwtLevel] = useState(savedState?.gwtLevel ?? 20);
-  const [activeStressLayer, setActiveStressLayer] = useState('settlement'); 
+  // Η εφαρμογή ξεκινά δείχνοντας μόνο τη γεωμετρία της τομής, χωρίς αποτελέσματα
+  const [activeStressLayer, setActiveStressLayer] = useState('none');
   const [heatmapStyle, setHeatmapStyle] = useState(savedState?.heatmapStyle || 'contours'); 
 
   // TIME CONSOLIDATION STATES
@@ -472,16 +534,9 @@ const App = () => {
     event.target.value = null; 
   };
 
-  const [legendState, setLegendState] = useState({ x: null, y: null, w: 70, h: 320, isDragging: false, isResizing: false, resizeEdge: null });
   const [hoverCursor, setHoverCursor] = useState('default');
-  const [contourImg, setContourImg] = useState(null); 
+  const [contourImg, setContourImg] = useState(null);
   const canvasRef = useRef(null);
-
-  useEffect(() => {
-    if (canvasSize.width > 0) {
-      setLegendState(p => p.x !== null ? p : { ...p, x: Math.max(20, canvasSize.width - 100), y: Math.max(20, canvasSize.height - 360) });
-    }
-  }, [canvasSize]);
 
   // Όρια του εδαφικού πεδίου: μόνο οι στρώσεις (τα 2D επιχώματα είναι φορτία πάνω από
   // την επιφάνεια και οι στραγγίσεις οριακές συνθήκες, δεν επεκτείνουν τον κάνναβο)
@@ -917,7 +972,8 @@ const App = () => {
   // Επίλυση 3D στερεοποίησης (ο αριθμητικός επιλυτής βρίσκεται στο consolidationSolver.js):
   // συντελεστές ανά κόμβο, χρονική ολοκλήρωση σε τμήματα ώστε να μην παγώνει ο browser,
   // και στιγμιότυπα υπερπίεσης, βαθμού στερεοποίησης και καθίζησης.
-  const solveConsolidationPDE = useCallback(() => {
+  // onDone(snaps): προαιρετική ενέργεια μετά το τέλος της επίλυσης (π.χ. άνοιγμα διαγράμματος χρόνου)
+  const solveConsolidationPDE = useCallback((onDone) => {
     if (!modelCache || !stressData) return;
     const maxYears = Number(timeSettings.maxYears);
     if (!(maxYears > 0)) { alert('Ο μέγιστος χρόνος πρέπει να είναι θετικός αριθμός ετών.'); return; }
@@ -1059,6 +1115,9 @@ const App = () => {
                 setTimeSnapshots(snaps);
                 setActiveTimeIndex(snaps.length - 1);
                 setIsSolvingTime(false);
+                // Αν δεν απεικονιζόταν τίποτα, δείξε την καθίζηση ώστε να φαίνεται το αποτέλεσμα
+                setActiveStressLayer(l => l === 'none' ? 'settlement' : l);
+                if (typeof onDone === 'function') onDone(snaps);
             }
         };
 
@@ -1112,6 +1171,29 @@ const App = () => {
     return surfaceYArray[c1] * (1 - tx) + surfaceYArray[c2] * tx;
   }, [stressData]);
 
+  // Εξέλιξη στον χρόνο στο σημείο (wx, wy, wz) της τομής: καθίζηση της επιφάνειας πάνω από
+  // το σημείο, υπερπίεση στο σημείο, μέσος βαθμός U = S/S∞ και τοπικός Uz = 1 − Δu/Δu0.
+  // Όλα τα μεγέθη παρεμβάλλονται στον ίδιο κάνναβο με τα στιγμιότυπα της επίλυσης.
+  const buildTimePlot = useCallback((wx, wy, wz, snaps) => {
+    if (!modelCache || !snaps?.length) return null;
+    const surfY = getSurfaceY(wx);
+    const du0 = Math.max(0, interpolate3D(wx, wy, wz, modelCache.cache.du));
+    const S_inf = Math.max(0, interpolate3D(wx, surfY, wz, modelCache.cache.settlement));
+    const pct = (v) => Math.max(0, Math.min(100, v));
+    const point = (timeSec, S, du, isInitial = false) => ({
+      timeSec, isInitial, S, du,
+      Uz: du0 > 0.1 ? pct(100 * (1 - du / du0)) : 100,
+      U: S_inf > 1e-6 ? pct(100 * S / S_inf) : 0,
+    });
+    const data = [point(TIME_PLOT_MIN_DAYS * 86400, 0, du0, true)];
+    snaps.forEach(snap => {
+      data.push(point(snap.timeSec,
+        Math.max(0, interpolate3D(wx, surfY, wz, snap.settlement)),
+        Math.max(0, interpolate3D(wx, wy, wz, snap.du))));
+    });
+    return { wx, wy, wz, surfY, depth: surfY - wy, du0, S_inf, data };
+  }, [modelCache, getSurfaceY, interpolate3D]);
+
   const getDisplacement = useCallback((wx, wy, wz) => {
     let dataArray = modelCache?.cache.settlement;
     if (activeTimeIndex >= 0 && timeSnapshots && timeSnapshots[activeTimeIndex]) {
@@ -1144,6 +1226,15 @@ const App = () => {
   // Τιμή του ενεργού μεγέθους στη θέση του δείκτη: παράγεται σε κάθε render, ώστε να
   // ακολουθεί και τις αλλαγές χρόνου ή επίλυσης χωρίς να κινηθεί το ποντίκι
   const cursorValue = activeStressLayer !== 'none' && stressData ? getPlotValue(mousePos.realX, mousePos.realY, mousePos.realZ) : null;
+
+  // Χρονική κατάσταση του μεγέθους που απεικονίζεται (για το υπόμνημα)
+  const displayStateLabel = (() => {
+    if (['sv0', 'u0', 'sv0_eff'].includes(activeStressLayer)) return 'Αρχική κατάσταση, πριν από τη φόρτιση';
+    if (!TIME_DEPENDENT_LAYERS.includes(activeStressLayer)) return 'Ανεξάρτητο του χρόνου';
+    if (timeSnapshots && activeTimeIndex >= 0 && timeSnapshots[activeTimeIndex]) return `t = ${formatTime(timeSnapshots[activeTimeIndex].timeSec)}`;
+    if (timeSnapshots || !['du', 'u_tot'].includes(activeStressLayer)) return 't → ∞ (τελική κατάσταση)';
+    return 't = 0 (αμέσως μετά τη φόρτιση)';
+  })();
 
   const colorScale = useMemo(() => {
     if (!modelCache || activeStressLayer === 'none') return null;
@@ -1472,12 +1563,6 @@ const App = () => {
     const rect = canvasRef.current.getBoundingClientRect();
     const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
 
-    if (colorScale && activeStressLayer !== 'none') { 
-      const { x: lx, y: ly, h: lh } = legendState;
-      const lw = lh / colorScale.numIntervals;
-      if (sx >= lx - 15 && sx <= lx + lw + 45 && sy >= ly - 30 && sy <= ly + lh + 30) { setLegendState(p => ({ ...p, isDragging: true })); setLastPointerPos({ x: e.clientX, y: e.clientY }); return; }
-    }
-
     if (e.button === 1 || e.button === 2 || (mode === 'pan' && e.button === 0)) { setIsPanning(true); setLastPointerPos({ x: e.clientX, y: e.clientY }); return; }
     if (show3D && mode === 'select' && e.button === 0) { setIsRotating3D(true); setLastPointerPos({ x: e.clientX, y: e.clientY }); return; }
 
@@ -1494,38 +1579,17 @@ const App = () => {
     // --- TIME PLOT CHART TRIGGER ---
     if (mode === 'time_plot') {
         if (!show3D && viewMode === 'profile') {
-            if (!timeSnapshots || timeSnapshots.length === 0) {
-                // Επιστρέφουμε σιωπηλά εάν δεν έχει τρέξει η επίλυση
-                return;
+            // Μόνο σημεία μέσα σε στρώση εδάφους
+            if (!findLayerAt(committedElements, wPos.x, wPos.y) || wPos.y > getSurfaceY(wPos.x)) return;
+            const { x: wx, y: wy } = wPos;
+            const wz = profileZ;
+
+            if (timeSnapshots?.length) {
+                setTimePlotData(buildTimePlot(wx, wy, wz, timeSnapshots));
+            } else {
+                // Δεν έχει γίνει ακόμα επίλυση: τρέχει τώρα και μετά ανοίγει το διάγραμμα
+                solveConsolidationPDE(snaps => setTimePlotData(buildTimePlot(wx, wy, wz, snaps)));
             }
-            
-            const surfY = getSurfaceY(wPos.x);
-            if (wPos.y > surfY) return; // Εκτός εδάφους
-
-            // Αρχική υπερπίεση (0 πάνω από τη Γ.Ο.Υ.), με την ίδια παρεμβολή στον κάνναβο
-            // της επίλυσης όπως και οι υπερπιέσεις των στιγμιοτύπων
-            const dsv0 = interpolate3D(wPos.x, wPos.y, profileZ, modelCache.cache.du);
-
-            const finalSettlement = interpolate3D(wPos.x, surfY, profileZ, modelCache.cache.settlement);
-
-            const chartData = [];
-            // Αρχική κατάσταση (t → 0, στην αρχή του λογαριθμικού άξονα)
-            chartData.push({ timeSec: TIME_PLOT_MIN_DAYS * 86400, du_pct: dsv0 > 0.1 ? 100 : 0, uz_pct: dsv0 > 0.1 ? 0 : 100, settlement: 0, isInitial: true });
-            
-            timeSnapshots.forEach(snap => {
-                let u_t = interpolate3D(wPos.x, wPos.y, profileZ, snap.du);
-                let s_mm = interpolate3D(wPos.x, surfY, profileZ, snap.settlement); // Καθίζηση στην επιφάνεια
-                
-                let du_pct = 0, uz_pct = 100;
-                if (dsv0 > 0.1) {
-                    du_pct = Math.max(0, Math.min(100, (u_t / dsv0) * 100));
-                    uz_pct = 100 - du_pct;
-                }
-                
-                chartData.push({ timeSec: snap.timeSec, du_pct, uz_pct, settlement: s_mm });
-            });
-            
-            setTimePlotData({ wx: wPos.x, wy: wPos.y, wz: profileZ, surfY, dsv0, finalSettlement, data: chartData });
         }
         return;
     }
@@ -1613,18 +1677,6 @@ const App = () => {
     const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
 
     let cur = 'default';
-    if (colorScale && activeStressLayer !== 'none' && !legendState.isDragging && !legendState.isResizing) { 
-      const { x: lx, y: ly, h: lh } = legendState;
-      const lw = lh / colorScale.numIntervals;
-      if (sx >= lx - 15 && sx <= lx + lw + 45 && sy >= ly - 30 && sy <= ly + lh + 30) cur = 'move';
-    }
-    
-    if (legendState.isDragging) { setLegendState(p => ({ ...p, x: p.x + (e.clientX - lastPointerPos.x), y: p.y + (e.clientY - lastPointerPos.y) })); setLastPointerPos({ x: e.clientX, y: e.clientY }); setHoverCursor('move'); return; }
-    if (legendState.isResizing) {
-      const dx = e.clientX - lastPointerPos.x, dy = e.clientY - lastPointerPos.y;
-      setLegendState(p => { let nW = p.w, nH = p.h; if (p.resizeEdge === 'br') { nW += dx; nH += dy; } else if (p.resizeEdge === 'r') nW += dx; else if (p.resizeEdge === 'b') nH += dy; return { ...p, w: Math.max(50, nW), h: Math.max(50, nH) }; });
-      setLastPointerPos({ x: e.clientX, y: e.clientY }); setHoverCursor(legendState.resizeEdge === 'br' ? 'nwse-resize' : legendState.resizeEdge === 'r' ? 'ew-resize' : 'ns-resize'); return;
-    }
     if (isPanning) { setView(p => ({ ...p, panX: p.panX + (e.clientX - lastPointerPos.x), panY: p.panY - (e.clientY - lastPointerPos.y) })); setLastPointerPos({ x: e.clientX, y: e.clientY }); setHoverCursor('grabbing'); return; }
     if (show3D && isRotating3D) { setRotation(p => ({ yaw: p.yaw - (e.clientX - lastPointerPos.x) * 0.003, pitch: Math.max(-Math.PI/2.2, Math.min(Math.PI/2.2, p.pitch + (e.clientY - lastPointerPos.y) * 0.003)) })); setLastPointerPos({ x: e.clientX, y: e.clientY }); setHoverCursor('grabbing'); return; }
 
@@ -1691,7 +1743,6 @@ const App = () => {
 const handlePointerUp = () => { 
     const wasDragging = draggingNode || planDragMode;
     setIsRotating3D(false); setIsPanning(false); setDraggingNode(null); setPlanDragMode(null);
-    setLegendState(p => ({...p, isDragging: false, isResizing: false, resizeEdge: null})); 
     
     if (dragStart && ['draw_rect', 'draw_circle', 'draw_3d_embankment'].includes(mode)) {
       const endPos = { x: mousePos.screenX, y: mousePos.screenY };
@@ -2333,54 +2384,7 @@ const finishPolygon = (e) => {
       ctx.fillStyle = '#334155';
       ctx.fill();
     }
-
-    if (hasRealData && activeStressLayer !== 'none') { 
-      const { startVal, step, numIntervals } = colorScale;
-      const { x: lx, y: ly, h: lh } = legendState;
-
-      const bandSize = lh / numIntervals;
-      const barW = bandSize; 
-
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
-      const padL = 15, padR = 60, padT = 45, padB = 20;
-      ctx.fillRect(lx - padL, ly - padT, barW + padL + padR, lh + padT + padB);
-      ctx.strokeStyle = '#cbd5e1'; ctx.lineWidth = 1; ctx.strokeRect(lx - padL, ly - padT, barW + padL + padR, lh + padT + padB);
-
-      ctx.fillStyle = '#000000'; ctx.font = 'bold 14px sans-serif'; ctx.textAlign = 'center';
-      const labels = { 'sv0': 'Ολική (σv0)', 'u0': 'Υδροστ. (u0)', 'sv0_eff': 'Ενεργός (σ\'v0)', 'dsv': 'Αύξηση (Δσv)', 'du': 'Υπερπίεση (Δu)', 'u_tot': 'Συνολική (u)', 'settlement': 'Καθίζηση (S)', 'strain': 'Παραμόρφ. (εy)', 'Uz': 'Βαθμός (Uz)' };
-      const unit = activeStressLayer === 'settlement' ? 'mm' : (activeStressLayer === 'strain' || activeStressLayer === 'Uz') ? '%' : 'kPa';
-      ctx.fillText(`${labels[activeStressLayer] || activeStressLayer}`, lx + barW/2, ly - 24);
-      ctx.fillText(`(${unit})`, lx + barW/2, ly - 8);
-
-      if (heatmapStyle === 'smooth') {
-        const grad = ctx.createLinearGradient(lx, ly + lh, lx, ly); 
-            
-        for (let i = 0; i <= numIntervals; i++) {
-            const ratio = numIntervals > 0 ? i / numIntervals : 0.5;
-            const hue = (activeStressLayer === 'Uz' ? ratio : 1.0 - ratio) * 240;
-            grad.addColorStop(ratio, `hsla(${hue}, 100%, 50%, 1.0)`);
-        }
-        ctx.fillStyle = grad;
-        ctx.fillRect(lx, ly, barW, lh);
-      } else {
-        for (let i = 0; i < numIntervals; i++) {
-          const ratio = numIntervals > 1 ? i / (numIntervals - 1) : 0.5;
-          const hue = (activeStressLayer === 'Uz' ? ratio : 1.0 - ratio) * 240;
-          ctx.fillStyle = `hsla(${hue}, 100%, 50%, 1.0)`;
-          ctx.fillRect(lx, ly + lh - (i+1) * bandSize, barW, Math.ceil(bandSize));
-        }
-      }
-      ctx.strokeStyle = '#475569'; ctx.strokeRect(lx, ly, barW, lh);
-      ctx.fillStyle = '#000000'; ctx.font = 'bold 13px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      for (let i = 0; i <= numIntervals; i++) {
-        const val = startVal + i * step;
-        const tickY = ly + lh - i * bandSize;
-        ctx.beginPath(); ctx.moveTo(lx, tickY); ctx.lineTo(lx + 5, tickY); ctx.stroke();
-        let dec = (activeStressLayer === 'strain' || activeStressLayer === 'Uz') && step < 1 ? (step < 0.1 ? 2 : 1) : 0;
-        ctx.textAlign = 'left'; ctx.fillText(val.toFixed(dec), lx + barW + 6, tickY);
-      }
-    }
-  }, [elements, currentPoints, dragStart, selectedId, mode, viewMode, canvasSize, view, mousePos, show3D, projectSettings, rotation, heatmaps, heatmapLevels, stressData, activeStressLayer, gwtLevel, colorScale, colorLUT, legendState, contourImg, profileZ, showLabels, showDeformedMesh, meshMagnification, textures3D, deformedQuads3D, deformedQuads2D, bounds, show3DModels, heatmapStyle, s2w, w2s]);
+  }, [elements, currentPoints, dragStart, selectedId, mode, viewMode, canvasSize, view, mousePos, show3D, projectSettings, rotation, heatmaps, heatmapLevels, stressData, activeStressLayer, gwtLevel, colorScale, colorLUT, contourImg, profileZ, showLabels, showDeformedMesh, meshMagnification, textures3D, deformedQuads3D, deformedQuads2D, bounds, show3DModels, heatmapStyle, s2w, w2s]);
 
 const updateSelectedProp = (key, value) => { 
       if (selectedId) {
@@ -2472,25 +2476,27 @@ const updateSelectedProp = (key, value) => {
       {/* --- TIME PLOT MODAL --- */}
       {timePlotData && (
           <div className="absolute inset-0 z-[60] flex items-center justify-center bg-slate-900/60 backdrop-blur-sm">
-              <div className="bg-white rounded-xl shadow-2xl w-[700px] max-w-[95%] overflow-hidden flex flex-col">
+              <div className="bg-white rounded-xl shadow-2xl w-[740px] max-w-[95%] max-h-[95vh] overflow-y-auto flex flex-col">
                   <div className="bg-slate-800 text-white px-5 py-3 flex justify-between items-center">
                       <div className="flex flex-col">
                           <h3 className="text-lg font-bold flex items-center gap-2"><LineChart size={20}/> Εξέλιξη Στερεοποίησης στον Χρόνο</h3>
                           <span className="text-xs text-slate-300">
-                              Σημείο Ανάλυσης: X={timePlotData.wx.toFixed(2)}m, Y={timePlotData.wy.toFixed(2)}m, Z={timePlotData.wz.toFixed(2)}m
+                              Σημείο: X={timePlotData.wx.toFixed(2)} m, Y={timePlotData.wy.toFixed(2)} m, Z={timePlotData.wz.toFixed(2)} m
+                              {' '}· βάθος {timePlotData.depth.toFixed(2)} m · Δu₀ = {timePlotData.du0.toFixed(1)} kPa · S∞ = {timePlotData.S_inf.toFixed(1)} mm
                           </span>
                       </div>
                       <button onClick={() => setTimePlotData(null)} className="p-1 hover:bg-slate-700 rounded transition-colors"><X size={24} /></button>
                   </div>
-                  
-                  <div className="p-6">
-                      <div className="flex gap-4 mb-4 text-sm font-semibold justify-center">
-                          <span className="flex items-center gap-1 text-red-600"><div className="w-4 h-1 bg-red-600"></div> Υπερπίεση Δu (%)</span>
-                          <span className="flex items-center gap-1 text-green-600"><div className="w-4 h-1 bg-green-600"></div> Βαθμός Uz (%)</span>
-                          <span className="flex items-center gap-1 text-purple-600"><div className="w-4 h-1 bg-purple-600"></div> Καθίζηση (mm) @Y={timePlotData.surfY.toFixed(2)}m</span>
+
+                  <div className="px-6 pt-4 pb-5">
+                      <div className="flex flex-wrap gap-x-5 gap-y-1 mb-3 text-xs font-semibold justify-center">
+                          <span className="flex items-center gap-1.5" style={{ color: TIME_PLOT_COLORS.S }}><span className="w-5 h-0.5 inline-block" style={{ background: TIME_PLOT_COLORS.S }}></span> Καθίζηση S της επιφάνειας</span>
+                          <span className="flex items-center gap-1.5" style={{ color: TIME_PLOT_COLORS.du }}><span className="w-5 h-0.5 inline-block" style={{ background: TIME_PLOT_COLORS.du }}></span> Υπερπίεση Δu στο σημείο</span>
+                          <span className="flex items-center gap-1.5" style={{ color: TIME_PLOT_COLORS.U }}><span className="w-5 h-0.5 inline-block" style={{ background: TIME_PLOT_COLORS.U }}></span> Μέσος βαθμός U = S/S∞</span>
+                          {timePlotData.du0 > 0.1 && <span className="flex items-center gap-1.5" style={{ color: TIME_PLOT_COLORS.Uz }}><span className="w-5 inline-block border-t-2 border-dashed" style={{ borderColor: TIME_PLOT_COLORS.Uz }}></span> Τοπικός βαθμός Uz στο σημείο</span>}
                       </div>
-                      <div className="flex justify-center bg-slate-50 border border-slate-200 rounded-lg p-4">
-                          <TimePlotChart data={timePlotData.data} finalSettlement={timePlotData.finalSettlement} />
+                      <div className="flex justify-center bg-slate-50 border border-slate-200 rounded-lg p-3">
+                          <TimePlotChart plot={timePlotData} />
                       </div>
                   </div>
               </div>
@@ -2604,9 +2610,13 @@ const updateSelectedProp = (key, value) => {
           </div>
         </div>
 
-        {/* RIGHT PANEL */}
-        <div className="w-80 bg-white border-l border-gray-200 flex flex-col shadow-sm z-10 shrink-0 h-full overflow-y-auto">
-          
+        {/* RIGHT PANEL: το υπόμνημα μένει σταθερό στην κορυφή, τα υπόλοιπα κυλίονται από κάτω */}
+        <div className="w-80 bg-white border-l border-gray-200 flex flex-col shadow-sm z-10 shrink-0 h-full">
+          {colorScale && activeStressLayer !== 'none' && (
+            <ColorLegend colorScale={colorScale} layer={activeStressLayer} heatmapStyle={heatmapStyle} stateLabel={displayStateLabel} />
+          )}
+
+          <div className="flex-1 min-h-0 overflow-y-auto flex flex-col">
           <div className="p-4 border-b border-gray-100 bg-amber-50">
             <h2 className="font-semibold text-amber-800 flex items-center gap-2 mb-3"><Timer size={18} /> Εξέλιξη στον Χρόνο (3D)</h2>
             
@@ -2615,7 +2625,7 @@ const updateSelectedProp = (key, value) => {
                  <label className="block text-xs text-amber-700 font-bold mb-1">Μέγιστος Χρόνος (Έτη)</label>
                  <input type="number" value={timeSettings.maxYears} onChange={(e) => setTimeSettings(p => ({...p, maxYears: Number(e.target.value)}))} className="w-full p-2 text-sm border border-amber-300 rounded outline-none" min="0.1" step="any" />
                </div>
-               <button onClick={solveConsolidationPDE} disabled={isSolvingTime} className="bg-amber-600 hover:bg-amber-700 text-white px-3 py-2 rounded text-sm font-bold shadow-sm transition-colors disabled:opacity-50">Επίλυση</button>
+               <button onClick={() => solveConsolidationPDE()} disabled={isSolvingTime} className="bg-amber-600 hover:bg-amber-700 text-white px-3 py-2 rounded text-sm font-bold shadow-sm transition-colors disabled:opacity-50">Επίλυση</button>
             </div>
 
             {timeSnapshots && timeSnapshots.length > 0 && (
@@ -2656,7 +2666,7 @@ const updateSelectedProp = (key, value) => {
                 <input type="number" value={projectSettings.length} onChange={(e) => setProjectSettings(prev => ({...prev, length: Number(e.target.value)}))} className="w-full p-2 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 outline-none" step="5" min="5" />
               </div>
               <div>
-                <label className="block text-xs text-gray-500 mb-1">Απεικόνιση (Κατάσταση: {activeTimeIndex === -1 ? 'Τελική' : (timeSnapshots && timeSnapshots[activeTimeIndex] ? formatTime(timeSnapshots[activeTimeIndex].timeSec) : 'Άγνωστη')})</label>
+                <label className="block text-xs text-gray-500 mb-1">Απεικόνιση Αποτελεσμάτων</label>
                 <select value={activeStressLayer} onChange={(e) => setActiveStressLayer(e.target.value)} className="w-full p-2 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 outline-none bg-white mb-3 font-semibold text-blue-800">
                   <option value="none">Καμία</option>
                   <option value="sv0">Αρχική Ολική (σv0)</option>
@@ -2890,6 +2900,7 @@ const updateSelectedProp = (key, value) => {
                 Επιλέξτε ένα στοιχείο για επεξεργασία.
               </div>
             )}
+          </div>
           </div>
         </div>
       </div>
