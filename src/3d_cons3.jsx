@@ -1,10 +1,11 @@
-import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
-import { 
-  Pencil, Square, MousePointer2, Settings2, CheckCircle2, 
-  Calculator, Layers, Undo2, Trash2, Grid3X3, Crosshair, Move,
-  ZoomIn, ZoomOut, Maximize, Box, Globe2, Layers as LayersIcon, Hand, Waves, Activity,
+import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
+import {
+  Pencil, Square, MousePointer2, Settings2,
+  Calculator, Trash2, Grid3X3,
+  ZoomIn, ZoomOut, Maximize, Box, Hand, Waves, Activity,
   LayoutTemplate, Circle as CircleIcon, Scan, Download, Upload, RotateCcw, X, Timer, Loader2, LineChart
 } from 'lucide-react';
+import { createImplicitSolver, buildTimeSchedule } from './consolidationSolver';
 
 const LAYER_COLORS = ['#8b4513', '#d2691e', '#cd853f', '#f4a460', '#556b2f', '#8fbc8f', '#a0522d'];
 
@@ -39,7 +40,9 @@ const hslToRgb = (h, s, l) => {
 
 const formatTime = (sec) => {
     const days = sec / 86400;
-    if (days < 29.5) return Math.round(days) === 1 ? '1 Ημέρα' : `${Math.round(days)} Ημέρες`;
+    if (days < 0.98) { const hours = Math.round(sec / 3600); return hours === 1 ? '1 Ώρα' : `${hours} Ώρες`; }
+    if (days < 9.95) { const d = Math.round(days * 10) / 10; return d === 1 ? '1 Ημέρα' : `${d.toFixed(1)} Ημέρες`; }
+    if (days < 29.5) return `${Math.round(days)} Ημέρες`;
     const months = days / 30.416;
     if (months < 11.5) return Math.round(months) === 1 ? '1 Μήνας' : `${Math.round(months)} Μήνες`;
     const years = days / 365.25;
@@ -64,6 +67,27 @@ const distToSegmentSquared = (p, v, w) => {
   let t = ((p.x - v.x) * (w.x - v.x) + (p.y - v.y) * (w.y - v.y)) / l2;
   t = Math.max(0, Math.min(1, t));
   return (p.x - (v.x + t * (w.x - v.x)))**2 + (p.y - (v.y + t * (w.y - v.y)))**2;
+};
+
+// Στρώση που περιέχει το σημείο (x, y) της τομής (σε επικάλυψη, η πρώτη στη λίστα)
+const findLayerAt = (elements, x, y) =>
+  elements.find(l => l.type === 'layer' && isPointInPolygon({ x, y }, l.points)) || null;
+
+// Παράμετροι στρώσης με προεπιλογές (k = 0 δεν έχει φυσικό νόημα, οπότε αντικαθίσταται)
+const layerParams = (layer) => {
+  const p = layer?.props || {};
+  return {
+    ky: p.ky || 1e-9, kh_kv: p.kh_kv || 1,
+    cc: p.cc ?? 0.35, cs: p.cs ?? 0.06, e0: p.e0 ?? 0.9, ocr: p.ocr ?? 1.0, mu_sk: p.mu_skempton ?? 1.0,
+  };
+};
+
+// Μεταβολή δείκτη πόρων κατά e-log(p') από σ'v0 σε σ'vf (με p'c ≥ σ'v0):
+// επαναφόρτιση με Cs έως p'c, παρθενική φόρτιση με Cc πέρα από αυτήν
+const voidRatioChange = (sv0, sf, pc, cc, cs) => {
+  if (sf <= pc) return { recomp: cs * Math.log10(sf / sv0), comp: 0 };
+  if (sv0 < pc) return { recomp: cs * Math.log10(pc / sv0), comp: cc * Math.log10(sf / pc) };
+  return { recomp: 0, comp: cc * Math.log10(sf / sv0) };
 };
 
 const defaultElements = [
@@ -191,6 +215,9 @@ const ELogPChart = ({ data }) => {
   );
 };
 
+// Αρχή του λογαριθμικού άξονα χρόνου στο διάγραμμα (ημέρες): εκεί σημειώνεται η αρχική κατάσταση
+const TIME_PLOT_MIN_DAYS = 0.1;
+
 // Component Γράφημα Εξέλιξης Χρόνου (Time Plot)
 const TimePlotChart = ({ data, finalSettlement }) => {
   const [hoverIdx, setHoverIdx] = useState(null);
@@ -198,17 +225,17 @@ const TimePlotChart = ({ data, finalSettlement }) => {
   if (!data || data.length === 0) return null;
   const w = 600, h = 300;
   const padL = 50, padR = 50, padT = 20, padB = 40;
-  
-  const minDays = 1; 
+
+  const minDays = TIME_PLOT_MIN_DAYS;
   const maxDays = Math.max(10, data[data.length - 1].timeSec / 86400);
   const minLog = Math.log10(minDays);
-  const maxLog = Math.log10(maxDays);
+  const maxLog = Math.ceil(Math.log10(maxDays) - 1e-9); // ο άξονας τελειώνει σε ακέραια δεκάδα
   
   let maxS = finalSettlement ? Math.max(1, finalSettlement) : 1;
   data.forEach(p => { if (p.settlement > maxS) maxS = p.settlement; });
   maxS = Math.ceil(maxS / 10) * 10; 
 
-  const getX = (days) => padL + (w - padL - padR) * ((Math.log10(Math.max(1, days)) - minLog) / (maxLog - minLog));
+  const getX = (days) => padL + (w - padL - padR) * ((Math.log10(Math.max(minDays, days)) - minLog) / (maxLog - minLog));
   const getY1 = (pct) => padT + (h - padT - padB) * (1 - pct / 100);
   const getY2 = (s) => padT + (h - padT - padB) * (1 - s / maxS);
   
@@ -217,7 +244,7 @@ const TimePlotChart = ({ data, finalSettlement }) => {
   const sLine = data.map(p => `${getX(p.timeSec / 86400)},${getY2(p.settlement)}`).join(' ');
 
   const xTicks = [];
-  for (let p = Math.floor(minLog); p <= Math.ceil(maxLog); p++) {
+  for (let p = Math.round(minLog); p <= maxLog; p++) {
        xTicks.push({ val: Math.pow(10, p), power: p });
   }
 
@@ -234,7 +261,7 @@ const TimePlotChart = ({ data, finalSettlement }) => {
       let closestIdx = 0;
       let minDiff = Infinity;
       for (let i = 0; i < data.length; i++) {
-          const ptLogT = Math.log10(Math.max(1, data[i].timeSec / 86400));
+          const ptLogT = Math.log10(Math.max(minDays, data[i].timeSec / 86400));
           const diff = Math.abs(ptLogT - logT);
           if (diff < minDiff) {
               minDiff = diff;
@@ -263,7 +290,7 @@ const TimePlotChart = ({ data, finalSettlement }) => {
 
           {/* Labels X */}
           {xTicks.map((t, i) => (
-             <text key={`lx-${i}`} x={getX(t.val)} y={h-padB + 18} textAnchor="middle" fill="#334155" fontWeight="bold">10^{t.power}d</text>
+             <text key={`lx-${i}`} x={getX(t.val)} y={h-padB + 18} textAnchor="middle" fill="#334155" fontWeight="bold">{t.power < 0 ? t.val.toFixed(-t.power) : t.val}</text>
           ))}
           <text x={w/2} y={h-padB + 36} textAnchor="middle" fill="#0f172a" fontWeight="bold">Χρόνος (Ημέρες - Log Scale)</text>
 
@@ -309,7 +336,7 @@ const TimePlotChart = ({ data, finalSettlement }) => {
                       <circle cx={hx} cy={getY2(pt.settlement)} r={4} fill="#9333ea" stroke="#fff" strokeWidth={1.5} />
 
                       <rect x={bX} y={bY} width={boxW} height={boxH} fill="white" stroke="#cbd5e1" rx={4} ry={4} fillOpacity={0.95} />
-                      <text x={bX + 8} y={bY + 18} fill="#1e293b" fontWeight="bold">t: {formatTime(pt.timeSec)}</text>
+                      <text x={bX + 8} y={bY + 18} fill="#1e293b" fontWeight="bold">t: {pt.isInitial ? '0 (αρχική)' : formatTime(pt.timeSec)}</text>
                       <text x={bX + 8} y={bY + 34} fill="#dc2626" fontWeight="bold">Δu: {pt.du_pct.toFixed(1)}%</text>
                       <text x={bX + 8} y={bY + 50} fill="#16a34a" fontWeight="bold">Uz: {pt.uz_pct.toFixed(1)}%</text>
                       <text x={bX + 8} y={bY + 66} fill="#9333ea" fontWeight="bold">S: {pt.settlement.toFixed(1)} mm</text>
@@ -368,7 +395,6 @@ const App = () => {
   const [view, setView] = useState({ scale: 20, panX: 150, panY: 50 });
   const [snapToGrid, setSnapToGrid] = useState(true);
   const [mousePos, setMousePos] = useState({ screenX: 0, screenY: 0, realX: 0, realY: 0, realZ: 0 });
-  const [cursorValue, setCursorValue] = useState(null);
   const [draggingNode, setDraggingNode] = useState(null);
 
   const [show3D, setShow3D] = useState(false);
@@ -390,13 +416,12 @@ const App = () => {
   const [eLogPData, setELogPData] = useState(null); 
   const [timePlotData, setTimePlotData] = useState(null); 
 
-  const [gwtLevel, setGwtLevel] = useState(savedState?.gwtLevel ?? 20); 
-  const [stressData, setStressData] = useState(null);
+  const [gwtLevel, setGwtLevel] = useState(savedState?.gwtLevel ?? 20);
   const [activeStressLayer, setActiveStressLayer] = useState('settlement'); 
   const [heatmapStyle, setHeatmapStyle] = useState(savedState?.heatmapStyle || 'contours'); 
 
   // TIME CONSOLIDATION STATES
-  const [timeSettings, setTimeSettings] = useState({ maxYears: 10, snapshots: 25 });
+  const [timeSettings, setTimeSettings] = useState({ maxYears: 10, snapshots: 40 });
   const [timeSnapshots, setTimeSnapshots] = useState(null);
   const [activeTimeIndex, setActiveTimeIndex] = useState(-1); 
   const [isSolvingTime, setIsSolvingTime] = useState(false);
@@ -453,14 +478,16 @@ const App = () => {
   const canvasRef = useRef(null);
 
   useEffect(() => {
-    if (legendState.x === null && canvasSize.width > 0) {
-      setLegendState(p => ({ ...p, x: Math.max(20, canvasSize.width - 100), y: Math.max(20, canvasSize.height - 360) })); 
+    if (canvasSize.width > 0) {
+      setLegendState(p => p.x !== null ? p : { ...p, x: Math.max(20, canvasSize.width - 100), y: Math.max(20, canvasSize.height - 360) });
     }
   }, [canvasSize]);
 
+  // Όρια του εδαφικού πεδίου: μόνο οι στρώσεις (τα 2D επιχώματα είναι φορτία πάνω από
+  // την επιφάνεια και οι στραγγίσεις οριακές συνθήκες, δεν επεκτείνουν τον κάνναβο)
   const bounds = useMemo(() => {
     let minX = 0, maxX = 20, minY = 0, maxY = 20;
-    const layers = committedElements.filter(e => e.points);
+    const layers = committedElements.filter(e => e.type === 'layer' && e.points?.length > 0);
     if (layers.length > 0) {
       minX = Math.min(...layers.flatMap(e => e.points.map(p => p.x)));
       maxX = Math.max(...layers.flatMap(e => e.points.map(p => p.x)));
@@ -480,35 +507,46 @@ const App = () => {
       if (el.props.baseW) maxDim = Math.max(maxDim, el.props.baseW, el.props.baseL);
     });
 
-    const step = Math.max(0.5, maxDim / 25); 
+    const step = Math.max(0.5, maxDim / 25);
+    // Ομοιόμορφη υποδιαίρεση ενός μήκους σε κελιά μεγέθους ≤ step που το καλύπτουν ακριβώς
+    const subdivide = (len) => { const n = Math.max(1, Math.ceil(len / step)); return { n, w: len / n }; };
+
     committedElements.forEach(el => {
       if (el.type === 'rect_load') {
         const { x, z, width, length, q } = el.props;
-        for (let lx = x + step/2; lx < x + width; lx += step) {
-          for (let lz = z + step/2; lz < z + length; lz += step) {
-            const dA = Math.min(step, (x + width) - (lx - step/2)) * Math.min(step, (z + length) - (lz - step/2));
-            loads.push({ x: lx, z: lz, P: q * dA });
+        if (!(width > 0 && length > 0)) return;
+        const sx = subdivide(width), sz = subdivide(length);
+        for (let i = 0; i < sx.n; i++) {
+          for (let j = 0; j < sz.n; j++) {
+            loads.push({ x: x + (i + 0.5) * sx.w, z: z + (j + 0.5) * sz.w, P: q * sx.w * sz.w });
           }
         }
       } else if (el.type === 'circle_load') {
         const { x, z, radius, q } = el.props;
-        for (let lx = x - radius + step/2; lx <= x + radius; lx += step) {
-          for (let lz = z - radius + step/2; lz <= z + radius; lz += step) {
-            const r = Math.hypot(lx - x, lz - z);
-            if (r <= radius) {
-              const dA = step * step; 
-              loads.push({ x: lx, z: lz, P: q * dA });
-            }
+        if (!(radius > 0)) return;
+        const s = subdivide(2 * radius);
+        const pts = [];
+        for (let i = 0; i < s.n; i++) {
+          for (let j = 0; j < s.n; j++) {
+            const lx = x - radius + (i + 0.5) * s.w, lz = z - radius + (j + 0.5) * s.w;
+            if (Math.hypot(lx - x, lz - z) <= radius) pts.push({ x: lx, z: lz });
           }
         }
+        // Κανονικοποίηση ώστε το συνολικό φορτίο να είναι ακριβώς q·πR²
+        const total = q * Math.PI * radius * radius;
+        if (pts.length === 0) loads.push({ x, z, P: total });
+        else pts.forEach(p => loads.push({ ...p, P: total / pts.length }));
       } else if (el.type === 'embankment_3d') {
         const { x, z, baseW, baseL, height, gamma } = el.props;
+        if (!(baseW > 0 && baseL > 0)) return;
         const slopeV = el.props.slopeV || 2;
         const topW = Math.max(0, baseW - 2 * (height / slopeV));
         const topL = Math.max(0, baseL - 2 * (height / slopeV));
         const cx = x + baseW/2, cz = z + baseL/2;
-        for (let lx = x + step/2; lx < x + baseW; lx += step) {
-          for (let lz = z + step/2; lz < z + baseL; lz += step) {
+        const sx = subdivide(baseW), sz = subdivide(baseL);
+        for (let i = 0; i < sx.n; i++) {
+          for (let j = 0; j < sz.n; j++) {
+            const lx = x + (i + 0.5) * sx.w, lz = z + (j + 0.5) * sz.w;
             const nx = Math.abs(lx - cx);
             const nz = Math.abs(lz - cz);
             let h = 0;
@@ -518,7 +556,7 @@ const App = () => {
               const hz = nz <= topL/2 ? height : Math.max(0, height * (1 - (nz - topL/2) / Math.max(0.001, (baseL - topL)/2)));
               h = Math.min(hx, hz);
             }
-            if (h > 0) loads.push({ x: lx, z: lz, P: h * gamma * step * step });
+            if (h > 0) loads.push({ x: lx, z: lz, P: h * gamma * sx.w * sz.w });
           }
         }
       }
@@ -526,25 +564,30 @@ const App = () => {
     return { loads, step };
   }, [committedElements]);
 
-  useEffect(() => {
+  // Αρχικές τάσεις και πρόσθετη τάση από τα 2D επιχώματα σε κάνναβο της τομής X-Y
+  const stressData = useMemo(() => {
     const layers = committedElements.filter(e => e.type === 'layer');
     const embankments = committedElements.filter(e => e.type === 'embankment');
-    if (layers.length === 0) { setStressData(null); return; }
+    if (layers.length === 0) return null;
 
     const { minX, maxX, minY, maxY } = bounds;
-    const dx = Math.max(0.5, (maxX - minX) / 50); 
+    const dx = Math.max(0.5, (maxX - minX) / 50);
     const dy = Math.max(0.5, (maxY - minY) / 50);
     const matrix = [];
-    
-    const embDx = dx;
+
     const embSlices = [];
 
-    // Κάθε 2D επίχωμα τεμαχίζεται ξεχωριστά με το δικό του γ (επαλληλία)
+    // Κάθε 2D επίχωμα τεμαχίζεται ξεχωριστά με το δικό του γ (επαλληλία) σε λωρίδες
+    // πλάτους ≤ dx που καλύπτουν ακριβώς το πλάτος του, με το ύψος στο μέσο κάθε λωρίδας
     embankments.forEach(emb => {
       const embMinX = Math.min(...emb.points.map(p => p.x));
       const embMaxX = Math.max(...emb.points.map(p => p.x));
       const gamma = emb.props.gamma || 20;
-      for (let x = embMinX; x <= embMaxX; x += embDx) {
+      const nSlices = Math.max(1, Math.ceil((embMaxX - embMinX) / dx));
+      const sliceW = (embMaxX - embMinX) / nSlices;
+      if (!(sliceW > 0)) return;
+      for (let s = 0; s < nSlices; s++) {
+        const x = embMinX + (s + 0.5) * sliceW;
         let y_ints = [];
         for (let i=0; i<emb.points.length; i++) {
           let p1 = emb.points[i], p2 = emb.points[(i+1)%emb.points.length];
@@ -557,7 +600,7 @@ const App = () => {
           y_ints.sort((a,b) => a-b);
           let h = y_ints[y_ints.length - 1] - y_ints[0];
           let baseY = y_ints[0];
-          if (h > 0) embSlices.push({ x, baseY, q: h * gamma });
+          if (h > 0) embSlices.push({ x, w: sliceW, baseY, q: h * gamma });
         }
       }
     });
@@ -604,8 +647,8 @@ const App = () => {
           let z = slice.baseY - y;
           if (z < 0) return;
           z = Math.max(0.001, z);
-          let dx1 = (slice.x - embDx / 2) - x;
-          let dx2 = (slice.x + embDx / 2) - x;
+          let dx1 = (slice.x - slice.w / 2) - x;
+          let dx2 = (slice.x + slice.w / 2) - x;
           let angle1 = Math.atan2(dx2, z);
           let angle2 = Math.atan2(dx1, z);
           let ds = (slice.q / Math.PI) * ( (angle1 - angle2) + z * (dx2 / (dx2*dx2 + z*z) - dx1 / (dx1*dx1 + z*z)) );
@@ -625,7 +668,7 @@ const App = () => {
         surfaceYArray[c] = colSurf;
     }
 
-    setStressData({ matrix, minX, maxX, minY, maxY, dx, dy, maxSv0, cols, rows, surfaceYArray });
+    return { matrix, minX, maxX, minY, maxY, dx, dy, maxSv0, cols, rows, surfaceYArray };
   }, [committedElements, gwtLevel, bounds]);
 
   const get3DStressData_Exact = useCallback((wx, wy, wz) => {
@@ -715,13 +758,9 @@ const App = () => {
     return { sv0: base.sv0, u0: base.u0, sv0_eff: base.sv0_eff, dsv, du, u_tot };
   }, [stressData, committedElements, pointLoads3D, gwtLevel]);
 
-  const settlementCache = useRef({});
-  useEffect(() => { settlementCache.current = {}; }, [stressData, committedElements, pointLoads3D, gwtLevel]);
-
+  // Καθίζηση κατακόρυφης στήλης (x, z): άθροισμα των συμπιέσεων των κελιών της τομής
   const getColumnSettlement_Exact = useCallback((wx, wz) => {
     if (!stressData) return { S_surf: 0, dS_array: [] };
-    const key = `${wx.toFixed(3)}_${wz.toFixed(3)}`;
-    if (settlementCache.current[key]) return settlementCache.current[key];
 
     const { minY, dy, rows, minX, dx, cols, matrix } = stressData;
     let exact_c = (wx - minX - dx/2) / dx;
@@ -735,44 +774,22 @@ const App = () => {
         let cell = matrix[c1]?.[r];
         if (!cell || cy > cell.surfY) continue;
 
-        let sv0_eff = Math.max(1, cell.sv0_eff);
-        let cc = 0.35, cs = 0.06, e0 = 0.9, ocr = 1.0, mu_sk = 1.0;
-        for (let l of committedElements) {
-            if (l.type === 'layer' && isPointInPolygon({x: wx, y: cy}, l.points)) {
-                cc = l.props.cc !== undefined ? l.props.cc : 0.35;
-                cs = l.props.cs !== undefined ? l.props.cs : 0.06;
-                e0 = l.props.e0 !== undefined ? l.props.e0 : 0.9;
-                ocr = l.props.ocr !== undefined ? l.props.ocr : 1.0;
-                mu_sk = l.props.mu_skempton !== undefined ? l.props.mu_skempton : 1.0;
-                break;
-            }
-        }
-        
-        let pc = sv0_eff * ocr;
-        if (pc < sv0_eff) pc = sv0_eff;
+        const { cc, cs, e0, ocr, mu_sk } = layerParams(findLayerAt(committedElements, wx, cy));
+        const sv0_eff = Math.max(1, cell.sv0_eff);
+        const pc = Math.max(sv0_eff, sv0_eff * ocr);
 
         let stressObj = get3DStressData_Exact(wx, cy, wz);
         let dsv = stressObj ? stressObj.dsv : 0;
         let dS = 0;
-        
         if (dsv > 0.01) {
-            let sf = sv0_eff + dsv;
-            if (sf <= pc) { dS = (cs / (1 + e0)) * Math.log10(sf / sv0_eff) * dy; } 
-            else {
-                let dS_recomp = 0, dS_comp = 0;
-                if (sv0_eff < pc) { dS_recomp = (cs / (1 + e0)) * Math.log10(pc / sv0_eff) * dy; dS_comp = (cc / (1 + e0)) * Math.log10(sf / pc) * dy; } 
-                else { dS_comp = (cc / (1 + e0)) * Math.log10(sf / sv0_eff) * dy; }
-                dS = dS_recomp + dS_comp;
-            }
+            const { recomp, comp } = voidRatioChange(sv0_eff, sv0_eff + dsv, pc, cc, cs);
+            dS = ((recomp + comp) / (1 + e0)) * dy * mu_sk;
         }
-        dS = dS * mu_sk;
-		dS_array[r] = dS;
+        dS_array[r] = dS;
         S_surf += dS;
     }
-    
-    const result = { S_surf, dS_array };
-    settlementCache.current[key] = result;
-    return result;
+
+    return { S_surf, dS_array };
   }, [stressData, committedElements, get3DStressData_Exact]);
 
   const calculateCellData = useCallback((wx, wy, wz) => {
@@ -787,40 +804,19 @@ const App = () => {
     let cell = matrix[c]?.[r];
     if (!cell || wy > cell.surfY) return null;
 
-    let depth = cell.surfY - wy; 
-    let sv0_eff = Math.max(1, cell.sv0_eff);
-    let cc = 0.35, cs = 0.06, e0 = 0.9, ocr = 1.0, mu_sk = 1.0;
-    let inLayer = false;
-    let layerName = 'Άγνωστη Στρώση';
-
-    for (let l of committedElements) {
-        if (l.type === 'layer' && isPointInPolygon({x: wx, y: wy}, l.points)) {
-            cc = l.props.cc !== undefined ? l.props.cc : 0.35;
-            cs = l.props.cs !== undefined ? l.props.cs : 0.06;
-            e0 = l.props.e0 !== undefined ? l.props.e0 : 0.9;
-            ocr = l.props.ocr !== undefined ? l.props.ocr : 1.0;
-            mu_sk = l.props.mu_skempton !== undefined ? l.props.mu_skempton : 1.0;
-            layerName = l.props.name;
-            inLayer = true;
-            break;
-        }
-    }
-    if (!inLayer) return null;
-
-    let pc = sv0_eff * ocr;
-    if (pc < sv0_eff) pc = sv0_eff;
+    let depth = cell.surfY - wy;
+    const layer = findLayerAt(committedElements, wx, wy);
+    if (!layer) return null;
+    const layerName = layer.props.name || 'Άγνωστη Στρώση';
+    const { cc, cs, e0, ocr, mu_sk } = layerParams(layer);
+    const sv0_eff = Math.max(1, cell.sv0_eff);
+    const pc = Math.max(sv0_eff, sv0_eff * ocr);
 
     let stressObj = get3DStressData_Exact(wx, wy, wz);
     let dsv = stressObj ? stressObj.dsv : 0;
     let sf = sv0_eff + dsv;
 
-    let de_recomp = 0, de_comp = 0;
-    if (sf <= pc) { de_recomp = cs * Math.log10(sf / sv0_eff); } 
-    else {
-        if (sv0_eff < pc) { de_recomp = cs * Math.log10(pc / sv0_eff); de_comp = cc * Math.log10(sf / pc); } 
-        else { de_comp = cc * Math.log10(sf / sv0_eff); }
-    }
-    
+    const { recomp: de_recomp, comp: de_comp } = voidRatioChange(sv0_eff, sf, pc, cc, cs);
     let de = de_recomp + de_comp;
     let dH = (de / (1 + e0)) * dy * mu_sk;
     let e_final = e0 - de;
@@ -896,9 +892,10 @@ const App = () => {
                     if (cy < wy) { S_y += colData.dS_array[r]; }
                 }
 
-                let local_dS = 0;
-                let r_idx = Math.floor((wy - stressData.minY) / stressData.dy);
-                if (r_idx >= 0 && r_idx < stressData.rows) { local_dS = colData.dS_array[r_idx] || 0; }
+                // Παραμόρφωση από το κελί που περιέχει τον κόμβο (ο ανώτατος κόμβος
+                // βρίσκεται στο άνω όριο του τελευταίου κελιού)
+                const r_idx = Math.max(0, Math.min(stressData.rows - 1, Math.floor((wy - stressData.minY) / stressData.dy)));
+                let local_dS = colData.dS_array[r_idx] || 0;
 
                 if (rigidId && rigidSettlements[rigidId] !== undefined && colData.S_surf > 0) {
                     let rigidRatio = rigidSettlements[rigidId] / colData.S_surf;
@@ -912,15 +909,15 @@ const App = () => {
     }
     
     return { nx, ny, nz, minX, minY, minZ: 0, stepX, stepY, stepZ, cache };
-  }, [stressData, pointLoads3D, committedElements, gwtLevel, projectSettings.length, bounds, rigidSettlements, get3DStressData_Exact, getColumnSettlement_Exact]);
+  }, [stressData, committedElements, projectSettings.length, bounds, rigidSettlements, get3DStressData_Exact, getColumnSettlement_Exact]);
 
-  // Επίλυση 3D στερεοποίησης: m_v·γw·∂u/∂t = ∇·(k ∇u)
-  // Πεπλεγμένο σχήμα (Backward Euler) σε συντηρητική μορφή: η ροή στις διεπιφάνειες
-  // στρώσεων υπολογίζεται με τον αρμονικό μέσο του k, οπότε διατηρείται η συνέχεια της ροής.
-  // Το σχήμα είναι ευσταθές για κάθε Δt, άρα δεν χρειάζεται περιορισμός του cv.
-  // Το γραμμικό σύστημα κάθε βήματος λύνεται με Συζυγείς Κλίσεις (PCG, Jacobi).
+  // Επίλυση 3D στερεοποίησης (ο αριθμητικός επιλυτής βρίσκεται στο consolidationSolver.js):
+  // συντελεστές ανά κόμβο, χρονική ολοκλήρωση σε τμήματα ώστε να μην παγώνει ο browser,
+  // και στιγμιότυπα υπερπίεσης, βαθμού στερεοποίησης και καθίζησης.
   const solveConsolidationPDE = useCallback(() => {
     if (!modelCache || !stressData) return;
+    const maxYears = Number(timeSettings.maxYears);
+    if (!(maxYears > 0)) { alert('Ο μέγιστος χρόνος πρέπει να είναι θετικός αριθμός ετών.'); return; }
     setIsSolvingTime(true);
     setSolveProgress(0);
     setActiveTimeIndex(-1);
@@ -937,167 +934,62 @@ const App = () => {
         const storage = new Float64Array(size); // γw·mv
         const isDrain = new Uint8Array(size);
 
-        for (let z=0; z<nz; z++) {
-            for (let y=0; y<ny; y++) {
-                let wy = minY + y * stepY;
-                for (let x=0; x<nx; x++) {
-                    let wx = minX + x * stepX;
-                    let idx = x + y*nx + z*nxy;
+        const drains = committedElements.filter(el => el.type === 'drain' && el.points?.length > 1);
+        // Κόμβος στράγγισης: απόσταση από τη γραμμή ≤ μισή διαγώνιο κελιού, ώστε η γραμμή να
+        // αντιστοιχεί σε μία συνεχή σειρά κόμβων και όχι σε ζώνη πάχους δύο κόμβων
+        const drainTol2 = 0.25 * (stepX * stepX + stepY * stepY);
 
-                    let surfY = 0;
-                    if (stressData.surfaceYArray) {
-                       let c1 = Math.max(0, Math.min(stressData.cols - 1, Math.floor((wx - stressData.minX - stressData.dx/2) / stressData.dx)));
-                       surfY = stressData.surfaceYArray[c1];
+        // Γεωμετρία και υλικά είναι ίδια σε όλο το μήκος Z: υπολογίζονται μία φορά ανά (x, y)
+        for (let y=0; y<ny; y++) {
+            const wy = minY + y * stepY;
+            for (let x=0; x<nx; x++) {
+                const wx = minX + x * stepX;
+                const c1 = Math.max(0, Math.min(stressData.cols - 1, Math.floor((wx - stressData.minX - stressData.dx/2) / stressData.dx)));
+                const surfY = stressData.surfaceYArray[c1];
+
+                // Πάνω από την επιφάνεια ή τη Γ.Ο.Υ. το έδαφος στραγγίζει ελεύθερα (u = 0)
+                const drain = wy >= surfY - 0.1 || wy >= gwtLevel || drains.some(el => {
+                    for (let i=0; i<el.points.length-1; i++) {
+                        if (distToSegmentSquared({x:wx, y:wy}, el.points[i], el.points[i+1]) <= drainTol2) return true;
                     }
+                    return false;
+                });
 
-                    if (wy >= surfY - 0.1) {
-                        isDrain[idx] = 1;
-                    } else {
-                        committedElements.forEach(el => {
-                            if (el.type === 'drain') {
-                                for(let i=0; i<el.points.length-1; i++) {
-                                    let d2 = distToSegmentSquared({x:wx, y:wy}, el.points[i], el.points[i+1]);
-                                    if (d2 < Math.max(stepX, stepY)**2) isDrain[idx] = 1;
-                                }
-                            }
-                        });
-                    }
+                const { ky, kh_kv, cc, cs, e0, ocr } = layerParams(findLayerAt(committedElements, wx, wy));
 
-                    let ky = 1e-9, kh_kv = 1, cc = 0.35, cs = 0.06, e0 = 0.9, ocr = 1.0, mu_sk = 1.0;
-                    committedElements.forEach(el => {
-                        if (el.type === 'layer' && isPointInPolygon({x:wx, y:wy}, el.points)) {
-                            ky = el.props.ky || 1e-9;
-                            kh_kv = el.props.kh_kv || 1;
-                            cc = el.props.cc ?? 0.35;
-                            cs = el.props.cs ?? 0.06;
-                            e0 = el.props.e0 ?? 0.9;
-                            ocr = el.props.ocr ?? 1.0;
-                            mu_sk = el.props.mu_skempton ?? 1.0;
-                        }
-                    });
+                for (let z=0; z<nz; z++) {
+                    const idx = x + y*nx + z*nxy;
+                    isDrain[idx] = drain ? 1 : 0;
                     kv[idx] = ky;
                     kh[idx] = ky * kh_kv;
 
-                    // mv: τέμνον από την τελική παραμόρφωση όπου υπάρχει φόρτιση,
-                    // αλλιώς εφαπτόμενο της καμπύλης e-log(p') στην αρχική τάση
-                    let dsv = cache.dsv[idx];
-                    let strainDec = cache.strain[idx] / 100;
+                    // mv από την οιδομετρική καμπύλη e-log(p') στον κόμβο: τέμνον έως την τελική
+                    // τάση όπου υπάρχει φόρτιση, αλλιώς εφαπτόμενο στην αρχική τάση. Ο μ
+                    // (Skempton-Bjerrum) και η διόρθωση άκαμπτου θεμελίου επηρεάζουν μόνο το
+                    // μέγεθος της καθίζησης, όχι το cv.
+                    const sv0 = Math.max(1, cache.sv0_eff[idx]);
+                    const pc = Math.max(sv0, sv0 * ocr);
+                    const dsv = cache.dsv[idx];
                     let mv;
-                    if (dsv > 1 && strainDec > 0) {
-                        mv = strainDec / dsv;
+                    if (dsv > 1) {
+                        const { recomp, comp } = voidRatioChange(sv0, sv0 + dsv, pc, cc, cs);
+                        mv = (recomp + comp) / ((1 + e0) * dsv);
                     } else {
-                        const sv = Math.max(1, cache.sv0_eff[idx]);
-                        const C = ocr > 1 ? cs : cc;
-                        mv = mu_sk * 0.434 * C / ((1 + e0) * sv);
+                        mv = (pc > sv0 ? cs : cc) / (Math.LN10 * (1 + e0) * sv0);
                     }
                     storage[idx] = GAMMA_W * Math.max(mv, 1e-7);
 
-                    u[idx] = isDrain[idx] ? 0 : cache.du[idx];
+                    u[idx] = drain ? 0 : cache.du[idx];
                 }
             }
         }
 
-        // Αγωγιμότητες προς τον επόμενο κόμβο σε κάθε διεύθυνση (αρμονικός μέσος k / Δ²).
-        // Στα πλευρικά όρια και στον πυθμένα δεν υπάρχει όψη: μηδενική ροή (Neumann).
-        const harm = (a, b) => (a > 0 && b > 0) ? 2 * a * b / (a + b) : 0;
-        const cX = new Float64Array(size), cY = new Float64Array(size), cZ = new Float64Array(size);
-        const diagK = new Float64Array(size);
-        for (let z=0; z<nz; z++) {
-            for (let y=0; y<ny; y++) {
-                for (let x=0; x<nx; x++) {
-                    let i = x + y*nx + z*nxy;
-                    if (x < nx-1) { cX[i] = harm(kh[i], kh[i+1]) / (stepX*stepX); diagK[i] += cX[i]; diagK[i+1] += cX[i]; }
-                    if (y < ny-1) { cY[i] = harm(kv[i], kv[i+nx]) / (stepY*stepY); diagK[i] += cY[i]; diagK[i+nx] += cY[i]; }
-                    if (z < nz-1) { cZ[i] = harm(kh[i], kh[i+nxy]) / (stepZ*stepZ); diagK[i] += cZ[i]; diagK[i+nxy] += cZ[i]; }
-                }
-            }
-        }
+        const implicitStep = createImplicitSolver({ nx, ny, nz, stepX, stepY, stepZ, kv, kh, storage, isDrain, u });
 
-        const activeList = [];
-        for (let i=0; i<size; i++) if (!isDrain[i]) activeList.push(i);
-        const active = Int32Array.from(activeList);
-
-        const r = new Float64Array(size), zv = new Float64Array(size), p = new Float64Array(size);
-        const Ap = new Float64Array(size), b = new Float64Array(size);
-
-        // out = (S/Δt + K)·v, με v = 0 στους κόμβους στράγγισης
-        const matvec = (v, out, invDt) => {
-            for (let z=0; z<nz; z++) {
-                for (let y=0; y<ny; y++) {
-                    let i = y*nx + z*nxy;
-                    for (let x=0; x<nx; x++, i++) {
-                        if (isDrain[i]) { out[i] = 0; continue; }
-                        let s = (storage[i] * invDt + diagK[i]) * v[i];
-                        if (x > 0) s -= cX[i-1] * v[i-1];
-                        if (x < nx-1) s -= cX[i] * v[i+1];
-                        if (y > 0) s -= cY[i-nx] * v[i-nx];
-                        if (y < ny-1) s -= cY[i] * v[i+nx];
-                        if (z > 0) s -= cZ[i-nxy] * v[i-nxy];
-                        if (z < nz-1) s -= cZ[i] * v[i+nxy];
-                        out[i] = s;
-                    }
-                }
-            }
-        };
-
-        // Ένα βήμα Backward Euler: (S/Δt + K)·u_new = S/Δt·u_old
-        const implicitStep = (dt) => {
-            const invDt = 1 / dt;
-            let bNorm2 = 0;
-            for (let k=0; k<active.length; k++) { const i = active[k]; b[i] = storage[i] * invDt * u[i]; bNorm2 += b[i]*b[i]; }
-            if (bNorm2 === 0) return;
-
-            matvec(u, Ap, invDt);
-            let rz = 0;
-            for (let k=0; k<active.length; k++) {
-                const i = active[k];
-                r[i] = b[i] - Ap[i];
-                zv[i] = r[i] / (storage[i] * invDt + diagK[i]);
-                p[i] = zv[i];
-                rz += r[i] * zv[i];
-            }
-            const tol2 = 1e-14 * bNorm2;
-            for (let it=0; it<2000; it++) {
-                let rr = 0;
-                for (let k=0; k<active.length; k++) { const i = active[k]; rr += r[i]*r[i]; }
-                if (rr <= tol2) break;
-
-                matvec(p, Ap, invDt);
-                let pAp = 0;
-                for (let k=0; k<active.length; k++) { const i = active[k]; pAp += p[i]*Ap[i]; }
-                const alpha = rz / pAp;
-                let rzNew = 0;
-                for (let k=0; k<active.length; k++) {
-                    const i = active[k];
-                    u[i] += alpha * p[i];
-                    r[i] -= alpha * Ap[i];
-                    zv[i] = r[i] / (storage[i] * invDt + diagK[i]);
-                    rzNew += r[i] * zv[i];
-                }
-                const beta = rzNew / rz;
-                rz = rzNew;
-                for (let k=0; k<active.length; k++) { const i = active[k]; p[i] = zv[i] + beta * p[i]; }
-            }
-            for (let k=0; k<active.length; k++) { const i = active[k]; if (u[i] < 0) u[i] = 0; }
-        };
-
-        const maxSec = timeSettings.maxYears * 365.25 * 86400;
+        // Στιγμιότυπα λογαριθμικά ισαπέχοντα από 1 ημέρα έως τον μέγιστο χρόνο
+        const maxSec = maxYears * 365.25 * 86400;
         const numSnaps = timeSettings.snapshots;
-        const snapTargets = [];
-        const minLog = Math.log10(30 * 86400);
-        const maxLog = Math.log10(maxSec);
-        for (let i=0; i<numSnaps; i++) {
-           snapTargets.push(Math.pow(10, minLog + i*(maxLog - minLog)/(numSnaps-1)));
-        }
-
-        // Χρονικά βήματα: λογαριθμικά πυκνά (STEPS_PER_DECADE ανά δεκάδα), συν τις ακριβείς
-        // στιγμές των στιγμιοτύπων, ώστε κάθε στιγμιότυπο να αντιστοιχεί ακριβώς στον χρόνο του
-        const STEPS_PER_DECADE = 30;
-        const t0 = Math.min(3600, snapTargets[0] / 10);
-        const allTimes = [...snapTargets];
-        for (let lt = Math.log10(t0); lt < maxLog; lt += 1 / STEPS_PER_DECADE) allTimes.push(Math.pow(10, lt));
-        allTimes.sort((a, b) => a - b);
-        const times = allTimes.filter((t, i) => i === 0 || t > allTimes[i-1] * (1 + 1e-9));
+        const { snapTargets, times } = buildTimeSchedule(maxSec, numSnaps, 86400);
 
         const snaps = [];
         let nextSnapIdx = 0;
@@ -1105,17 +997,17 @@ const App = () => {
         let currentSec = 0;
 
         const takeSnapshot = (timeSec) => {
-            let snapDu = Float32Array.from(u);
-            let snapStrain = new Float32Array(size);
-            let snapSet = new Float32Array(size);
-            let snapUz = new Float32Array(size);
+            const snapDu = Float32Array.from(u);
+            const snapStrain = new Float32Array(size);
+            const snapSet = new Float32Array(size);
+            const snapUz = new Float32Array(size);
 
             for (let ix=0; ix<nx; ix++) {
                for (let kz=0; kz<nz; kz++) {
-                  let verticalSet = 0;
+                  let verticalSet = 0, prevUz = 1;
                   for (let jy=0; jy<ny; jy++) {
-                      let iIdx = ix + jy*nx + kz*nxy;
-                      let du0 = cache.du[iIdx];
+                      const iIdx = ix + jy*nx + kz*nxy;
+                      const du0 = cache.du[iIdx];
                       let Uz = 1;
                       if (du0 > 0.1) {
                           Uz = Math.max(0, Math.min(1, 1 - (snapDu[iIdx] / du0)));
@@ -1125,15 +1017,15 @@ const App = () => {
                           snapUz[iIdx] = cache.dsv[iIdx] > 0.1 ? 100 : 0;
                       }
 
-                      let exact_delta_S = 0;
+                      // Συμπίεση του διαστήματος μεταξύ διαδοχικών κόμβων επί τον μέσο βαθμό
+                      // στερεοποίησης των δύο άκρων του (τραπεζοειδής κανόνας)
                       if (jy === 0) {
-                          exact_delta_S = cache.settlement[iIdx];
+                          verticalSet = cache.settlement[iIdx] * Uz;
                       } else {
-                          let prevIdx = ix + (jy-1)*nx + kz*nxy;
-                          exact_delta_S = Math.max(0, cache.settlement[iIdx] - cache.settlement[prevIdx]);
+                          const dS = Math.max(0, cache.settlement[iIdx] - cache.settlement[iIdx - nx]);
+                          verticalSet += dS * 0.5 * (Uz + prevUz);
                       }
-
-                      verticalSet += exact_delta_S * Uz;
+                      prevUz = Uz;
                       snapSet[iIdx] = verticalSet;
                       snapStrain[iIdx] = cache.strain[iIdx] * Uz;
                   }
@@ -1169,7 +1061,7 @@ const App = () => {
 
         computeFrame();
     }, 100);
-  }, [modelCache, stressData, timeSettings, committedElements]);
+  }, [modelCache, stressData, timeSettings, committedElements, gwtLevel]);
 
   const interpolate3D = useCallback((wx, wy, wz, dataArray) => {
     if (!modelCache || !dataArray) return 0;
@@ -1245,6 +1137,10 @@ const App = () => {
 
     return interpolate3D(wx, wy, wz, dataArray);
   }, [modelCache, activeStressLayer, getSurfaceY, interpolate3D, activeTimeIndex, timeSnapshots]);
+
+  // Τιμή του ενεργού μεγέθους στη θέση του δείκτη: παράγεται σε κάθε render, ώστε να
+  // ακολουθεί και τις αλλαγές χρόνου ή επίλυσης χωρίς να κινηθεί το ποντίκι
+  const cursorValue = activeStressLayer !== 'none' && stressData ? getPlotValue(mousePos.realX, mousePos.realY, mousePos.realZ) : null;
 
   const colorScale = useMemo(() => {
     if (!modelCache || activeStressLayer === 'none') return null;
@@ -1446,7 +1342,7 @@ const App = () => {
         imgXZ: heatmaps.horizontal ? generatePlaneImg('XZ') : null,
         imgYZ: heatmaps.vertical ? generatePlaneImg('YZ') : null
     };
-  }, [show3D, showDeformedMesh, stressData, colorScale, colorLUT, activeStressLayer, heatmaps, heatmapLevels, bounds, projectSettings.length, getPlotValue, heatmapStyle, activeTimeIndex]);
+  }, [show3D, showDeformedMesh, stressData, colorScale, colorLUT, activeStressLayer, heatmaps, heatmapLevels, bounds, projectSettings.length, getPlotValue, heatmapStyle]);
 
   const deformedQuads3D = useMemo(() => {
       const hasRealData = stressData && activeStressLayer !== 'none' && colorScale;
@@ -1486,7 +1382,7 @@ const App = () => {
           }
       }
       return quads;
-  }, [show3D, showDeformedMesh, stressData, activeStressLayer, colorScale, bounds, projectSettings.length, getDisplacement, getPlotValue, meshMagnification, activeTimeIndex]);
+  }, [show3D, showDeformedMesh, stressData, activeStressLayer, colorScale, bounds, projectSettings.length, getDisplacement, getPlotValue, meshMagnification]);
 
   const deformedQuads2D = useMemo(() => {
       const hasRealData = stressData && activeStressLayer !== 'none' && colorScale;
@@ -1528,7 +1424,7 @@ const App = () => {
           }
       }
       return quads;
-  }, [show3D, showDeformedMesh, stressData, activeStressLayer, colorScale, bounds, profileZ, viewMode, getDisplacement, getPlotValue, getSurfaceY, meshMagnification, activeTimeIndex]);
+  }, [show3D, showDeformedMesh, stressData, activeStressLayer, colorScale, bounds, profileZ, viewMode, getDisplacement, getPlotValue, getSurfaceY, meshMagnification]);
 
   useEffect(() => {
     const updateSize = () => {
@@ -1541,19 +1437,35 @@ const App = () => {
     return () => window.removeEventListener('resize', updateSize);
   }, []);
 
-  const s2w = (sx, sy) => {
+  const s2w = useCallback((sx, sy) => {
     let wx = (sx - view.panX) / view.scale;
     let wy_or_z = (canvasSize.height - sy - view.panY) / view.scale;
     if (snapToGrid && !show3D && !isPanning && mode !== 'pan') { wx = Math.round(wx); wy_or_z = Math.round(wy_or_z); }
     return { x: wx, y: wy_or_z };
-  };
+  }, [view, canvasSize.height, snapToGrid, show3D, isPanning, mode]);
 
-  const w2s = (wx, wy_or_z) => ({ x: wx * view.scale + view.panX, y: canvasSize.height - (wy_or_z * view.scale + view.panY) });
-  
+  const w2s = useCallback((wx, wy_or_z) => ({ x: wx * view.scale + view.panX, y: canvasSize.height - (wy_or_z * view.scale + view.panY) }), [view, canvasSize.height]);
+
   const handleZoom = (factor) => setView(prev => ({ ...prev, scale: Math.max(2, Math.min(prev.scale * factor, 200)) }));
+
+  // Zoom με τη ροδέλα: ο listener πρέπει να είναι non-passive για να ακυρωθεί η κύλιση της σελίδας
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const onWheel = (e) => {
+      e.preventDefault();
+      const factor = e.deltaY > 0 ? 0.9 : 1.1;
+      setView(prev => ({ ...prev, scale: Math.max(2, Math.min(prev.scale * factor, 200)) }));
+    };
+    canvas.addEventListener('wheel', onWheel, { passive: false });
+    return () => canvas.removeEventListener('wheel', onWheel);
+  }, []);
   const resetView = () => { setView({ scale: 20, panX: 150, panY: 50 }); setRotation({ yaw: Math.PI / 4, pitch: Math.PI / 6 }); };
 
   const handlePointerDown = (e) => {
+    // Τα γεγονότα του δείκτη συνεχίζουν να έρχονται εδώ και όταν βγει εκτός καμβά,
+    // ώστε το σύρσιμο να τελειώνει σωστά στο pointerup
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* δεν υποστηρίζεται */ }
     const rect = canvasRef.current.getBoundingClientRect();
     const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
 
@@ -1587,14 +1499,15 @@ const App = () => {
             const surfY = getSurfaceY(wPos.x);
             if (wPos.y > surfY) return; // Εκτός εδάφους
 
-            const initialStress = get3DStressData_Exact(wPos.x, wPos.y, profileZ);
-            const dsv0 = initialStress ? initialStress.du : 0; // αρχική υπερπίεση (0 πάνω από τη Γ.Ο.Υ.)
-            
+            // Αρχική υπερπίεση (0 πάνω από τη Γ.Ο.Υ.), με την ίδια παρεμβολή στον κάνναβο
+            // της επίλυσης όπως και οι υπερπιέσεις των στιγμιοτύπων
+            const dsv0 = interpolate3D(wPos.x, wPos.y, profileZ, modelCache.cache.du);
+
             const finalSettlement = interpolate3D(wPos.x, surfY, profileZ, modelCache.cache.settlement);
-            
+
             const chartData = [];
-            // Αρχική κατάσταση (t~0 για λογαριθμική κλίμακα)
-            chartData.push({ timeSec: 86400, du_pct: dsv0 > 0.1 ? 100 : 0, uz_pct: dsv0 > 0.1 ? 0 : 100, settlement: 0 });
+            // Αρχική κατάσταση (t → 0, στην αρχή του λογαριθμικού άξονα)
+            chartData.push({ timeSec: TIME_PLOT_MIN_DAYS * 86400, du_pct: dsv0 > 0.1 ? 100 : 0, uz_pct: dsv0 > 0.1 ? 0 : 100, settlement: 0, isInitial: true });
             
             timeSnapshots.forEach(snap => {
                 let u_t = interpolate3D(wPos.x, wPos.y, profileZ, snap.du);
@@ -1606,7 +1519,7 @@ const App = () => {
                     uz_pct = 100 - du_pct;
                 }
                 
-                chartData.push({ timeSec: Math.max(86400, snap.timeSec), du_pct, uz_pct, settlement: s_mm });
+                chartData.push({ timeSec: snap.timeSec, du_pct, uz_pct, settlement: s_mm });
             });
             
             setTimePlotData({ wx: wPos.x, wy: wPos.y, wz: profileZ, surfY, dsv0, finalSettlement, data: chartData });
@@ -1740,13 +1653,6 @@ const App = () => {
     }
     
     setMousePos({ screenX: wPos.x, screenY: wPos.y, realX: realPos.x, realY: realPos.y, realZ: realPos.z });
-
-    if (activeStressLayer !== 'none' && stressData) {
-      let val = getPlotValue(realPos.x, realPos.y, realPos.z);
-      setCursorValue(val);
-    } else {
-      setCursorValue(null);
-    }
 
     if (draggingNode && !show3D && viewMode === 'profile') {
       const updatedElements = elements.map(el => el.id !== draggingNode.id ? el : {
@@ -2191,7 +2097,7 @@ const finishPolygon = (e) => {
           ctx.save(); ctx.globalAlpha = 1.0;
           ctx.imageSmoothingEnabled = true; 
           ctx.beginPath();
-          elements.filter(e => e.points).forEach(layer => {
+          elements.filter(e => e.type === 'layer' && e.points?.length > 0).forEach(layer => {
             if (layer.points.length > 0) {
               ctx.moveTo(w2s(layer.points[0].x, layer.points[0].y).x, w2s(layer.points[0].x, layer.points[0].y).y);
               for (let i=1; i<layer.points.length; i++) ctx.lineTo(w2s(layer.points[i].x, layer.points[i].y).x, w2s(layer.points[i].x, layer.points[i].y).y);
@@ -2241,18 +2147,23 @@ const finishPolygon = (e) => {
           if (!el.type.includes('load') && el.type !== 'embankment_3d') return;
           if (isInitialState) return; 
           
-          const zSpan = (el.props.length || el.props.baseL || (el.props.radius ? el.props.radius * 2 : 0)) / 2;
-          const zMid = el.props.z + zSpan;
-          const inPlane = Math.abs(profileZ - zMid) <= (zSpan + 1); 
-          
+          // Έκταση του φορτίου κατά Z (ο κύκλος ορίζεται από το κέντρο του, τα υπόλοιπα από τη γωνία)
+          const isCircle = el.type === 'circle_load';
+          const zMin = isCircle ? el.props.z - el.props.radius : el.props.z;
+          const zMax = isCircle ? el.props.z + el.props.radius : el.props.z + (el.props.length || el.props.baseL || 0);
+          const inPlane = profileZ >= zMin - 1 && profileZ <= zMax + 1;
+
           const isSelected = el.id === selectedId;
           const color = el.props.color || '#000';
-          
+
           let loadStartX = el.props.x;
           let loadEndX = el.props.x + (el.props.width || el.props.baseW || 0);
-          if (el.type === 'circle_load') {
-             loadStartX = el.props.x - el.props.radius;
-             loadEndX = el.props.x + el.props.radius;
+          if (isCircle) {
+             // Χορδή του κύκλου στη θέση της τομής (ολόκληρη η διάμετρος όταν η τομή είναι εκτός)
+             const dz = profileZ - el.props.z;
+             const halfChord = Math.abs(dz) < el.props.radius ? Math.sqrt(el.props.radius ** 2 - dz * dz) : el.props.radius;
+             loadStartX = el.props.x - halfChord;
+             loadEndX = el.props.x + halfChord;
           }
           
           let h = 0;
@@ -2466,7 +2377,7 @@ const finishPolygon = (e) => {
         ctx.textAlign = 'left'; ctx.fillText(val.toFixed(dec), lx + barW + 6, tickY);
       }
     }
-  }, [elements, currentPoints, dragStart, selectedId, mode, viewMode, canvasSize, view, snapToGrid, mousePos, show3D, projectSettings, rotation, heatmaps, heatmapLevels, isPanning, stressData, activeStressLayer, gwtLevel, colorScale, legendState, contourImg, profileZ, pointLoads3D, showLabels, showDeformedMesh, meshMagnification, textures3D, deformedQuads3D, deformedQuads2D, bounds, show3DModels, heatmapStyle, activeTimeIndex, timeSnapshots]);
+  }, [elements, currentPoints, dragStart, selectedId, mode, viewMode, canvasSize, view, mousePos, show3D, projectSettings, rotation, heatmaps, heatmapLevels, stressData, activeStressLayer, gwtLevel, colorScale, colorLUT, legendState, contourImg, profileZ, showLabels, showDeformedMesh, meshMagnification, textures3D, deformedQuads3D, deformedQuads2D, bounds, show3DModels, heatmapStyle, s2w, w2s]);
 
 const updateSelectedProp = (key, value) => { 
       if (selectedId) {
@@ -2657,15 +2568,15 @@ const updateSelectedProp = (key, value) => {
             onContextMenu={finishPolygon}
             style={{ cursor: hoverCursor }}
           >
-            <canvas 
-              ref={canvasRef} 
-              width={canvasSize.width} 
-              height={canvasSize.height} 
-              className="absolute top-0 left-0 w-full h-full touch-none outline-none" 
-              onWheel={(e) => { e.preventDefault(); handleZoom(e.deltaY > 0 ? 0.9 : 1.1); }}
+            <canvas
+              ref={canvasRef}
+              width={canvasSize.width}
+              height={canvasSize.height}
+              className="absolute top-0 left-0 w-full h-full touch-none outline-none"
             />
 
-            <div className="absolute top-8 left-32 flex items-center bg-white p-2 rounded-lg shadow-md gap-2 opacity-90 hover:opacity-100 transition-opacity">
+            {/* Τα κλικ στα κουμπιά zoom δεν πρέπει να φτάνουν στον καμβά (π.χ. να προσθέτουν κορυφή πολυγώνου) */}
+            <div className="absolute top-8 left-32 flex items-center bg-white p-2 rounded-lg shadow-md gap-2 opacity-90 hover:opacity-100 transition-opacity" onPointerDown={(e) => e.stopPropagation()} onPointerUp={(e) => e.stopPropagation()} onContextMenu={(e) => e.stopPropagation()}>
               <button onClick={() => handleZoom(1.1)} className="p-2 hover:bg-gray-100 rounded text-gray-700"><ZoomIn size={20} /></button>
               <button onClick={() => handleZoom(0.9)} className="p-2 hover:bg-gray-100 rounded text-gray-700"><ZoomOut size={20} /></button>
               <button onClick={resetView} className="p-2 hover:bg-gray-100 rounded text-gray-700"><Maximize size={20} /></button>
@@ -2699,7 +2610,7 @@ const updateSelectedProp = (key, value) => {
             <div className="flex gap-2 items-end mb-3">
                <div className="flex-1">
                  <label className="block text-xs text-amber-700 font-bold mb-1">Μέγιστος Χρόνος (Έτη)</label>
-                 <input type="number" value={timeSettings.maxYears} onChange={(e) => setTimeSettings(p => ({...p, maxYears: Number(e.target.value)}))} className="w-full p-2 text-sm border border-amber-300 rounded outline-none" min="1" />
+                 <input type="number" value={timeSettings.maxYears} onChange={(e) => setTimeSettings(p => ({...p, maxYears: Number(e.target.value)}))} className="w-full p-2 text-sm border border-amber-300 rounded outline-none" min="0.1" step="any" />
                </div>
                <button onClick={solveConsolidationPDE} disabled={isSolvingTime} className="bg-amber-600 hover:bg-amber-700 text-white px-3 py-2 rounded text-sm font-bold shadow-sm transition-colors disabled:opacity-50">Επίλυση</button>
             </div>
@@ -2723,7 +2634,7 @@ const updateSelectedProp = (key, value) => {
                     />
                     <div className="flex justify-between text-[10px] text-slate-500 mt-1 font-medium">
                         <span>{formatTime(timeSnapshots[0].timeSec)}</span>
-                        <span>{timeSettings.maxYears} Έτη</span>
+                        <span>{formatTime(timeSnapshots[timeSnapshots.length - 1].timeSec)}</span>
                         <span>Άπειρο</span>
                     </div>
                 </div>
