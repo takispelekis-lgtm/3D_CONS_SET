@@ -118,7 +118,10 @@ const defaultElements = [
 
 // Ρυθμίσεις υπολογισμού (CALCULATION): κόμβοι καννάβου κατά X, Y (βάθος), Z, μέγιστος χρόνος,
 // χρονικά βήματα ανά δεκάδα χρόνου και αριθμός στιγμιοτύπων της λύσης
-const DEFAULT_CALC = { nx: 31, ny: 41, nz: 31, maxYears: 10, stepsPerDecade: 30, snapshots: 40 };
+const DEFAULT_CALC = { nx: 31, ny: 81, nz: 31, maxYears: 10, stepsPerDecade: 30, snapshots: 40 };
+// Προεπιλογές προηγούμενης έκδοσης: όποιος δεν τις είχε αλλάξει παίρνει τις νέες
+const OLD_DEFAULT_CALCS = [{ nx: 31, ny: 41, nz: 31, maxYears: 10, stepsPerDecade: 30, snapshots: 40 }];
+const isOldDefaultCalc = (c) => OLD_DEFAULT_CALCS.some(d => Object.keys(d).every(k => Number(c?.[k]) === d[k]));
 const CALC_LIMITS = { nx: [5, 101], ny: [5, 101], nz: [5, 101], stepsPerDecade: [5, 200], snapshots: [5, 200] };
 
 // Έγκυρες τιμές για τον υπολογισμό, ό,τι κι αν έχει πληκτρολογηθεί στα πεδία
@@ -584,7 +587,8 @@ const App = () => {
   const [heatmapStyle, setHeatmapStyle] = useState(savedState?.heatmapStyle || 'contours');
 
   // CALCULATION: ρυθμίσεις επίλυσης και σημεία παρακολούθησης (αποθηκεύονται με το μοντέλο)
-  const [calcSettings, setCalcSettings] = useState(savedState?.calcSettings || DEFAULT_CALC);
+  const [calcSettings, setCalcSettings] = useState(() =>
+    savedState?.calcSettings && !isOldDefaultCalc(savedState.calcSettings) ? savedState.calcSettings : DEFAULT_CALC);
   const calc = useMemo(() => sanitizeCalc(calcSettings), [calcSettings]);
   const [monitorPoints, setMonitorPoints] = useState(savedState?.monitorPoints ?? (savedState ? [] : DEFAULT_MONITOR_POINTS));
   const [selectedPointId, setSelectedPointId] = useState(null);
@@ -752,7 +756,12 @@ const App = () => {
 
     const { minX, maxX, minY, maxY } = bounds;
     const dx = Math.max(0.5, (maxX - minX) / 50);
-    const dy = Math.max(0.5, (maxY - minY) / 50);
+    // Κατακόρυφα κελιά ευθυγραμμισμένα με τους κόμβους του καννάβου επίλυσης (Δy/m, όχι
+    // μεγαλύτερα από max(0,5 m, H/50)): η συμπίεση κάθε διαστήματος μεταξύ κόμβων προκύπτει
+    // από τα δικά του κελιά, οπότε πυκνότερος κάνναβος κατά Y βελτιώνει πράγματι την
+    // καθίζηση των πρώτων χρόνων κοντά στα όρια στράγγισης
+    const stepYModel = (maxY - minY) / (calc.ny - 1) || 1;
+    const dy = stepYModel / Math.max(1, Math.ceil(stepYModel / Math.max(0.5, (maxY - minY) / 50) - 1e-9));
     const matrix = [];
 
     const embSlices = [];
@@ -786,7 +795,7 @@ const App = () => {
     });
 
     const cols = Math.ceil((maxX - minX) / dx);
-    const rows = Math.ceil((maxY - minY) / dy);
+    const rows = Math.max(1, Math.round((maxY - minY) / dy));
     let maxSv0 = 0;
 
     for (let c = 0; c < cols; c++) {
@@ -849,7 +858,7 @@ const App = () => {
     }
 
     return { matrix, minX, maxX, minY, maxY, dx, dy, maxSv0, cols, rows, surfaceYArray };
-  }, [committedElements, gwtLevel, bounds]);
+  }, [committedElements, gwtLevel, bounds, calc.ny]);
 
   const get3DStressData_Exact = useCallback((wx, wy, wz) => {
     if (!stressData) return null;

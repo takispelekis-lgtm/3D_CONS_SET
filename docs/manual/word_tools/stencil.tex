@@ -1,0 +1,19 @@
+\documentclass[border=6pt]{standalone}
+\usepackage{fontspec}
+\setmainfont{Times New Roman}
+\usepackage{tikz}
+\begin{document}
+\begin{tikzpicture}[x=1cm,y=1cm]
+  \draw[thick] (-2.2,0) -- (2.2,0);
+  \draw[thick] (0,-2.2) -- (0,2.2);
+  \draw[dashed,gray] (-1.6,-1.6) -- (1.6,1.6);
+  \filldraw[fill=blue!10,draw=blue!70!black,thick] (0,0) circle (0.45);
+  \node at (0,0) {$u_{i,j,k}$};
+  \node[above] at (0,2.2) {$u_{i,j-1,k}$ (Πάνω)};
+  \node[below] at (0,-2.2) {$u_{i,j+1,k}$ (Κάτω)};
+  \node[left] at (-2.2,0) {$u_{i-1,j,k}$ (Αριστερά)};
+  \node[right] at (2.2,0) {$u_{i+1,j,k}$ (Δεξιά)};
+  \node[gray,above right] at (1.5,1.5) {$u_{i,j,k-1}$ (Πίσω)};
+  \node[gray,below left] at (-1.5,-1.5) {$u_{i,j,k+1}$ (Μπροστά)};
+\end{tikzpicture}
+\end{document}
