@@ -20,3 +20,7 @@ npm run dev
 ```
 
 Η εφαρμογή ανοίγει στο http://localhost:5173. Κάθε αλλαγή που ανεβαίνει στον κλάδο `main` δημοσιεύεται αυτόματα στο GitHub Pages.
+
+## Εγχειρίδιο
+
+Η πηγή του εγχειριδίου είναι το [docs/manual/cons3d_manual.tex](docs/manual/cons3d_manual.tex) (LuaLaTeX, γραμματοσειρά Noto Sans). Μεταγλώττιση με `lualatex cons3d_manual.tex` δύο φορές και αντιγραφή του PDF στη ρίζα ως «Εγχειρίδιο CONS3D.pdf».

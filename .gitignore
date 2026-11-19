@@ -9,6 +9,12 @@ lerna-debug.log*
 
 node_modules
 dist
+
+# Βοηθητικά αρχεία μεταγλώττισης του εγχειριδίου (το τελικό PDF είναι στη ρίζα)
+docs/manual/*.aux
+docs/manual/*.out
+docs/manual/*.toc
+docs/manual/*.pdf
 dist-ssr
 *.local
 
