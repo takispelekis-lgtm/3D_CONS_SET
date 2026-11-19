@@ -3,7 +3,8 @@ import {
   Pencil, Square, MousePointer2, Settings2,
   Calculator, Trash2, Grid3X3,
   ZoomIn, ZoomOut, Maximize, Box, Hand, Waves, Activity,
-  LayoutTemplate, Circle as CircleIcon, Scan, Download, Upload, RotateCcw, X, Timer, Loader2, LineChart
+  LayoutTemplate, Circle as CircleIcon, Scan, Save, FolderOpen, RotateCcw, X, Timer, Loader2, LineChart,
+  Crosshair, Plus, Play, Tag, Eye, EyeOff, FileDown, Palette
 } from 'lucide-react';
 import { createImplicitSolver, buildTimeSchedule } from './consolidationSolver';
 
@@ -115,6 +116,79 @@ const defaultElements = [
   }
 ];
 
+// Ρυθμίσεις υπολογισμού (CALCULATION): κόμβοι καννάβου κατά X, Y (βάθος), Z, μέγιστος χρόνος,
+// χρονικά βήματα ανά δεκάδα χρόνου και αριθμός στιγμιοτύπων της λύσης
+const DEFAULT_CALC = { nx: 31, ny: 41, nz: 31, maxYears: 10, stepsPerDecade: 30, snapshots: 40 };
+const CALC_LIMITS = { nx: [5, 101], ny: [5, 101], nz: [5, 101], stepsPerDecade: [5, 200], snapshots: [5, 200] };
+
+// Έγκυρες τιμές για τον υπολογισμό, ό,τι κι αν έχει πληκτρολογηθεί στα πεδία
+const sanitizeCalc = (c) => {
+  const out = { ...DEFAULT_CALC };
+  Object.entries(CALC_LIMITS).forEach(([k, [lo, hi]]) => {
+    const raw = c?.[k];
+    if (raw === '' || raw === null || raw === undefined) return; // κενό πεδίο: προεπιλογή
+    const v = Number(raw);
+    if (Number.isFinite(v)) out[k] = Math.min(hi, Math.max(lo, Math.round(v)));
+  });
+  const years = Number(c?.maxYears);
+  if (years > 0) out.maxYears = years;
+  return out;
+};
+
+// Σημεία παρακολούθησης του προεπιλεγμένου μοντέλου: κάτω από το κυκλικό φορτίο και το 3D επίχωμα
+const DEFAULT_MONITOR_POINTS = [
+  { id: 'mp1', name: 'Σ1', x: 30, y: 10, z: 14 },
+  { id: 'mp2', name: 'Σ2', x: 13.5, y: 10, z: 26 },
+];
+
+// Αρχείο προβλήματος (JSON): INPUT (γεωμετρία, φορτία, οριακές συνθήκες, Γ.Ο.Υ., μήκος Z)
+// και ρυθμίσεις CALCULATION (κάνναβος, χρόνος, σημεία παρακολούθησης). Χωρίς αποτελέσματα.
+const PROBLEM_FORMAT = 'CONS_3D';
+const PROBLEM_VERSION = 2;
+const ELEMENT_TYPES = ['layer', 'embankment', 'drain', 'rect_load', 'circle_load', 'embankment_3d'];
+const isFiniteNum = (v) => typeof v === 'number' && Number.isFinite(v);
+
+const buildProblemFile = ({ elements, gwtLevel, lengthZ, calcSettings, monitorPoints }) => ({
+  format: PROBLEM_FORMAT,
+  version: PROBLEM_VERSION,
+  savedAt: new Date().toISOString(),
+  input: { elements, gwtLevel, lengthZ },
+  calculation: { settings: sanitizeCalc(calcSettings), monitorPoints },
+});
+
+// Έλεγχος και κανονικοποίηση αρχείου προβλήματος (νέας μορφής ή παλαιότερου αρχείου της
+// εφαρμογής). Επιστρέφει { problem } ή { error } με μήνυμα για τον χρήστη.
+const parseProblemFile = (data) => {
+  if (!data || typeof data !== 'object') return { error: 'το αρχείο δεν περιέχει δεδομένα.' };
+  const isNew = data.format === PROBLEM_FORMAT;
+  if (isNew && data.version > PROBLEM_VERSION) return { error: 'το αρχείο προέρχεται από νεότερη έκδοση του CONS_3D.' };
+  const input = isNew ? data.input : data;
+  const calcPart = (isNew ? data.calculation : data) || {};
+  const elements = input?.elements;
+  if (!Array.isArray(elements)) return { error: 'το αρχείο δεν περιέχει μοντέλο CONS_3D.' };
+  for (const el of elements) {
+    if (!el || !ELEMENT_TYPES.includes(el.type) || !el.props || typeof el.props !== 'object') return { error: 'το αρχείο περιέχει στοιχείο άγνωστου τύπου.' };
+    if (['layer', 'embankment', 'drain'].includes(el.type) &&
+        !(Array.isArray(el.points) && el.points.length >= 2 && el.points.every(p => isFiniteNum(p?.x) && isFiniteNum(p?.y)))) {
+      return { error: `το στοιχείο «${el.props.name || el.type}» δεν έχει έγκυρες κορυφές.` };
+    }
+  }
+  const lengthZ = isNew ? input.lengthZ : input.projectSettings?.length;
+  const settings = calcPart.settings || calcPart.calcSettings;
+  const points = Array.isArray(calcPart.monitorPoints) ? calcPart.monitorPoints : [];
+  return {
+    problem: {
+      elements: elements.map((el, i) => ({ ...el, id: String(el.id ?? `el${i}`) })),
+      gwtLevel: isFiniteNum(input.gwtLevel) ? input.gwtLevel : 20,
+      lengthZ: isFiniteNum(lengthZ) && lengthZ > 0 ? lengthZ : 50,
+      calcSettings: settings ? sanitizeCalc(settings) : DEFAULT_CALC,
+      monitorPoints: points
+        .filter(p => p && ['x', 'y', 'z'].every(k => Number.isFinite(Number(p[k]))))
+        .map((p, i) => ({ id: String(p.id ?? `mp${i}`), name: String(p.name ?? `Σ${i + 1}`), x: Number(p.x), y: Number(p.y), z: Number(p.z) })),
+    },
+  };
+};
+
 const getInitialState = () => {
   try {
     const saved = localStorage.getItem('geoConsolidateState_v1');
@@ -215,8 +289,29 @@ const ELogPChart = ({ data }) => {
   );
 };
 
+// Σήμανση σημείου παρακολούθησης στον καμβά: κύκλος με σταυρόνημα και όνομα.
+// dimmed: σημείο εκτός της τρέχουσας τομής, selected: επιλεγμένο σημείο
+const drawMonitorMarker = (ctx, x, y, label, { selected = false, dimmed = false } = {}) => {
+  const color = '#0f766e';
+  ctx.save();
+  ctx.globalAlpha = dimmed ? 0.5 : 1;
+  if (selected) { ctx.beginPath(); ctx.arc(x, y, 11, 0, Math.PI * 2); ctx.strokeStyle = '#f59e0b'; ctx.lineWidth = 3; ctx.stroke(); }
+  ctx.beginPath(); ctx.moveTo(x - 10, y); ctx.lineTo(x + 10, y); ctx.moveTo(x, y - 10); ctx.lineTo(x, y + 10);
+  ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.beginPath(); ctx.arc(x, y, 5.5, 0, Math.PI * 2);
+  ctx.fillStyle = dimmed ? '#ffffff' : color; ctx.fill();
+  ctx.lineWidth = 2; ctx.stroke();
+  // Η ετικέτα μένει ευανάγνωστη και πάνω σε σκούρο heatmap· μόνο το σύμβολο γίνεται αχνό
+  ctx.globalAlpha = 1;
+  ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+  const tw = ctx.measureText(label).width;
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.9)'; ctx.fillRect(x + 9, y - 23, tw + 8, 16);
+  ctx.fillStyle = dimmed ? '#64748b' : color; ctx.fillText(label, x + 13, y - 10);
+  ctx.restore();
+};
+
 // Αρχή του λογαριθμικού άξονα χρόνου στο διάγραμμα (ημέρες): εκεί σημειώνεται η αρχική κατάσταση
-const TIME_PLOT_MIN_DAYS = 0.1;
+const TIME_PLOT_MIN_DAYS = 0.01;
 
 // Άξονας με «στρογγυλό» βήμα (1, 2, 2.5, 5 × 10ⁿ) από το 0 έως πάνω από το maxVal
 const niceAxis = (maxVal, targetTicks = 4) => {
@@ -458,11 +553,16 @@ const App = () => {
   const [mousePos, setMousePos] = useState({ screenX: 0, screenY: 0, realX: 0, realY: 0, realZ: 0 });
   const [draggingNode, setDraggingNode] = useState(null);
 
+  // Τρεις καταστάσεις εργασίας: 'input' (γεωμετρία, φορτία, οριακές συνθήκες),
+  // 'calc' (κάνναβος, χρόνος, σημεία παρακολούθησης, επίλυση), 'output' (αποτελέσματα)
+  const [uiMode, setUiMode] = useState('input');
   const [show3D, setShow3D] = useState(false);
   const [projectSettings, setProjectSettings] = useState(savedState?.projectSettings || { type: '3d', length: 50 });
   const [profileZ, setProfileZ] = useState(savedState?.profileZ ?? 14);
   const [showLabels, setShowLabels] = useState(false);
-  const [showDeformedMesh, setShowDeformedMesh] = useState(false);
+  // Το παραμορφωμένο δίκτυο και τα αποτελέσματα σχεδιάζονται μόνο στο OUTPUT
+  const [deformedMeshOn, setDeformedMeshOn] = useState(false);
+  const showDeformedMesh = uiMode === 'output' && deformedMeshOn;
   const [meshMagnification, setMeshMagnification] = useState(20);
   const [show3DModels, setShow3DModels] = useState(true);
 
@@ -478,62 +578,87 @@ const App = () => {
   const [timePlotData, setTimePlotData] = useState(null); 
 
   const [gwtLevel, setGwtLevel] = useState(savedState?.gwtLevel ?? 20);
-  // Η εφαρμογή ξεκινά δείχνοντας μόνο τη γεωμετρία της τομής, χωρίς αποτελέσματα
-  const [activeStressLayer, setActiveStressLayer] = useState('none');
-  const [heatmapStyle, setHeatmapStyle] = useState(savedState?.heatmapStyle || 'contours'); 
+  // Μέγεθος που έχει επιλεγεί για απεικόνιση· σχεδιάζεται μόνο στο OUTPUT
+  const [selectedResultLayer, setSelectedResultLayer] = useState('none');
+  const activeStressLayer = uiMode === 'output' ? selectedResultLayer : 'none';
+  const [heatmapStyle, setHeatmapStyle] = useState(savedState?.heatmapStyle || 'contours');
 
-  // TIME CONSOLIDATION STATES
-  const [timeSettings, setTimeSettings] = useState({ maxYears: 10, snapshots: 40 });
+  // CALCULATION: ρυθμίσεις επίλυσης και σημεία παρακολούθησης (αποθηκεύονται με το μοντέλο)
+  const [calcSettings, setCalcSettings] = useState(savedState?.calcSettings || DEFAULT_CALC);
+  const calc = useMemo(() => sanitizeCalc(calcSettings), [calcSettings]);
+  const [monitorPoints, setMonitorPoints] = useState(savedState?.monitorPoints ?? (savedState ? [] : DEFAULT_MONITOR_POINTS));
+  const [selectedPointId, setSelectedPointId] = useState(null);
+  const [problemFileName, setProblemFileName] = useState(savedState?.problemFileName || null);
+
+  // Λύση: στιγμιότυπα για την απεικόνιση στον χρόνο και ιστορικά των σημείων παρακολούθησης
   const [timeSnapshots, setTimeSnapshots] = useState(null);
-  const [activeTimeIndex, setActiveTimeIndex] = useState(-1); 
+  const [monitorHistories, setMonitorHistories] = useState(null);
+  const [activeTimeIndex, setActiveTimeIndex] = useState(-1);
   const [isSolvingTime, setIsSolvingTime] = useState(false);
   const [solveProgress, setSolveProgress] = useState(0);
 
   useEffect(() => {
-    const stateToSave = { elements: committedElements, projectSettings, gwtLevel, heatmapStyle, heatmaps, heatmapLevels, profileZ };
-    localStorage.setItem('geoConsolidateState_v1', JSON.stringify(stateToSave));
-  }, [committedElements, projectSettings, gwtLevel, heatmapStyle, heatmaps, heatmapLevels, profileZ]);
+    const stateToSave = { elements: committedElements, projectSettings, gwtLevel, heatmapStyle, heatmaps, heatmapLevels, profileZ, calcSettings, monitorPoints, problemFileName };
+    try { localStorage.setItem('geoConsolidateState_v1', JSON.stringify(stateToSave)); } catch { /* χωρίς αποθήκευση */ }
+  }, [committedElements, projectSettings, gwtLevel, heatmapStyle, heatmaps, heatmapLevels, profileZ, calcSettings, monitorPoints, problemFileName]);
 
+  // Κάθε αλλαγή στο μοντέλο, στις ρυθμίσεις υπολογισμού ή στα σημεία ακυρώνει την υπάρχουσα λύση
   useEffect(() => {
      setTimeSnapshots(null);
+     setMonitorHistories(null);
      setActiveTimeIndex(-1);
-  }, [committedElements, gwtLevel, projectSettings.length]);
-  
-    const handleExport = () => {
-    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify({ elements, projectSettings, gwtLevel, heatmapStyle, heatmaps, heatmapLevels, profileZ }));
-    const downloadAnchorNode = document.createElement('a');
-    downloadAnchorNode.setAttribute("href", dataStr);
-    downloadAnchorNode.setAttribute("download", "geo_model.json");
-    document.body.appendChild(downloadAnchorNode);
-    downloadAnchorNode.click();
-    downloadAnchorNode.remove();
+  }, [committedElements, gwtLevel, projectSettings.length, calc, monitorPoints]);
+
+  // Αποθήκευση του προβλήματος σε αρχείο: INPUT και ρυθμίσεις CALCULATION, χωρίς αποτελέσματα.
+  // Όπου υποστηρίζεται (Chrome, Edge), ο χρήστης διαλέγει όνομα και φάκελο· αλλιώς γίνεται λήψη.
+  const saveProblem = async () => {
+    const text = JSON.stringify(buildProblemFile({ elements: committedElements, gwtLevel, lengthZ: projectSettings.length, calcSettings, monitorPoints }), null, 2);
+    const suggestedName = problemFileName || 'CONS3D_problem.json';
+    if (typeof window.showSaveFilePicker === 'function') {
+      try {
+        const handle = await window.showSaveFilePicker({ suggestedName, types: [{ description: 'Πρόβλημα CONS_3D (JSON)', accept: { 'application/json': ['.json'] } }] });
+        const writable = await handle.createWritable();
+        await writable.write(text);
+        await writable.close();
+        setProblemFileName(handle.name);
+        return;
+      } catch (err) {
+        if (err?.name === 'AbortError') return; // ο χρήστης ακύρωσε
+        // διαφορετικά συνεχίζουμε με απλή λήψη του αρχείου
+      }
+    }
+    const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+    const a = document.createElement('a');
+    a.href = url; a.download = suggestedName;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+    setProblemFileName(suggestedName);
   };
 
-  const handleImport = (event) => {
+  // Φόρτωση προβλήματος από αρχείο (και παλαιότερα αρχεία της εφαρμογής). Αντικαθιστά το
+  // τρέχον πρόβλημα· η εφαρμογή επιστρέφει στο INPUT, χωρίς αποτελέσματα.
+  const loadProblem = (event) => {
     const file = event.target.files[0];
+    event.target.value = null;
     if (!file) return;
     const reader = new FileReader();
     reader.onload = (e) => {
-      try {
-        const data = JSON.parse(e.target.result);
-        if (data.elements) { 
-            setElements(data.elements); 
-            setCommittedElements(data.elements); 
-        }
-        if (data.projectSettings) setProjectSettings(data.projectSettings);
-        if (data.gwtLevel !== undefined) setGwtLevel(data.gwtLevel);
-        if (data.heatmapStyle) setHeatmapStyle(data.heatmapStyle);
-        if (data.heatmaps) setHeatmaps(data.heatmaps);
-        if (data.heatmapLevels) setHeatmapLevels(data.heatmapLevels);
-        if (data.profileZ !== undefined) setProfileZ(data.profileZ);
-      } catch {
-        alert('Το αρχείο δεν είναι έγκυρο μοντέλο CONS_3D (JSON).');
-      }
+      let data;
+      try { data = JSON.parse(e.target.result); } catch { alert('Το αρχείο δεν είναι έγκυρο JSON.'); return; }
+      const { problem, error } = parseProblemFile(data);
+      if (error) { alert(`Δεν ήταν δυνατή η φόρτωση: ${error}`); return; }
+      setElements(problem.elements); setCommittedElements(problem.elements);
+      setGwtLevel(problem.gwtLevel);
+      setProjectSettings(p => ({ ...p, length: problem.lengthZ }));
+      setProfileZ(z => Math.min(z, problem.lengthZ));
+      setCalcSettings(problem.calcSettings);
+      setMonitorPoints(problem.monitorPoints);
+      setSelectedId(null); setSelectedPointId(null); setTimePlotData(null); setELogPData(null);
+      setProblemFileName(file.name);
+      setUiMode('input'); setMode('select'); setCurrentPoints([]); setDragStart(null);
     };
     reader.readAsText(file);
-    event.target.value = null; 
   };
-
   const [hoverCursor, setHoverCursor] = useState('default');
   const [contourImg, setContourImg] = useState(null);
   const canvasRef = useRef(null);
@@ -903,10 +1028,10 @@ const App = () => {
     if (!stressData || committedElements.length === 0) return null;
     const { minX, maxX, minY, maxY } = bounds;
     const maxZ = projectSettings.length;
-    // Πυκνότερος κάνναβος κατά το βάθος: κοντά στα όρια στράγγισης η υπερπίεση μεταβάλλεται
-    // απότομα στους πρώτους χρόνους, και ο μισός όγκος ελέγχου του κόμβου στράγγισης
-    // στερεοποιείται αμέσως, οπότε το βήμα Δy καθορίζει την πλασματική αρχική καθίζηση
-    const nx = 31, ny = 41, nz = 31;
+    // Κόμβοι από τις ρυθμίσεις υπολογισμού. Προεπιλογή: πυκνότερος κάνναβος κατά το βάθος,
+    // γιατί κοντά στα όρια στράγγισης η υπερπίεση μεταβάλλεται απότομα στους πρώτους χρόνους
+    // και ο μισός όγκος ελέγχου του κόμβου στράγγισης στερεοποιείται αμέσως
+    const { nx, ny, nz } = calc;
     const stepX = (maxX - minX) / (nx - 1) || 1;
     const stepY = (maxY - minY) / (ny - 1) || 1;
     const stepZ = maxZ / (nz - 1) || 1;
@@ -967,16 +1092,26 @@ const App = () => {
     }
     
     return { nx, ny, nz, minX, minY, minZ: 0, stepX, stepY, stepZ, cache };
-  }, [stressData, committedElements, projectSettings.length, bounds, rigidSettlements, get3DStressData_Exact, getColumnSettlement_Exact]);
+  }, [stressData, committedElements, projectSettings.length, bounds, rigidSettlements, get3DStressData_Exact, getColumnSettlement_Exact, calc]);
 
+  // Στάθμη της επιφάνειας του εδάφους στη θέση x (γραμμική παρεμβολή στον κάνναβο τάσεων)
+  const getSurfaceY = useCallback((wx) => {
+    if (!stressData || !stressData.surfaceYArray) return 0;
+    const { minX, dx, cols, surfaceYArray } = stressData;
+    let exact_c = (wx - minX - dx/2) / dx;
+    let c1 = Math.max(0, Math.min(cols - 1, Math.floor(exact_c)));
+    let c2 = Math.max(0, Math.min(cols - 1, c1 + 1));
+    let tx = Math.max(0, Math.min(1, exact_c - c1));
+    
+    return surfaceYArray[c1] * (1 - tx) + surfaceYArray[c2] * tx;
+  }, [stressData]);
   // Επίλυση 3D στερεοποίησης (ο αριθμητικός επιλυτής βρίσκεται στο consolidationSolver.js):
   // συντελεστές ανά κόμβο, χρονική ολοκλήρωση σε τμήματα ώστε να μην παγώνει ο browser,
   // και στιγμιότυπα υπερπίεσης, βαθμού στερεοποίησης και καθίζησης.
-  // onDone(snaps): προαιρετική ενέργεια μετά το τέλος της επίλυσης (π.χ. άνοιγμα διαγράμματος χρόνου)
-  const solveConsolidationPDE = useCallback((onDone) => {
+  // Στα σημεία παρακολούθησης καταγράφονται τα μεγέθη σε κάθε χρονικό βήμα.
+  const solveConsolidationPDE = useCallback(() => {
     if (!modelCache || !stressData) return;
-    const maxYears = Number(timeSettings.maxYears);
-    if (!(maxYears > 0)) { alert('Ο μέγιστος χρόνος πρέπει να είναι θετικός αριθμός ετών.'); return; }
+    if (!(Number(calcSettings.maxYears) > 0)) { alert('Ο μέγιστος χρόνος πρέπει να είναι θετικός αριθμός ετών.'); return; }
     setIsSolvingTime(true);
     setSolveProgress(0);
     setActiveTimeIndex(-1);
@@ -1046,9 +1181,36 @@ const App = () => {
         const implicitStep = createImplicitSolver({ nx, ny, nz, stepX, stepY, stepZ, kv, kh, storage, isDrain, u });
 
         // Στιγμιότυπα λογαριθμικά ισαπέχοντα από 1 ημέρα έως τον μέγιστο χρόνο
-        const maxSec = maxYears * 365.25 * 86400;
-        const numSnaps = timeSettings.snapshots;
-        const { snapTargets, times } = buildTimeSchedule(maxSec, numSnaps, 86400);
+        const maxSec = calc.maxYears * 365.25 * 86400;
+        const numSnaps = calc.snapshots;
+        const { snapTargets, times } = buildTimeSchedule(maxSec, numSnaps, 86400, calc.stepsPerDecade);
+
+        // Βαθμός στερεοποίησης κόμβου (0…1) από την τρέχουσα υπερπίεση. Χωρίς αρχική
+        // υπερπίεση (π.χ. πάνω από τη Γ.Ο.Υ.) η καθίζηση είναι άμεση.
+        const nodeUz = (i) => {
+            const du0 = cache.du[i];
+            return du0 > 0.1 ? Math.max(0, Math.min(1, 1 - u[i] / du0)) : 1;
+        };
+
+        // Καθίζηση της στήλης (ix, kz) στον τρέχοντα χρόνο: συμπίεση κάθε διαστήματος μεταξύ
+        // διαδοχικών κόμβων επί τον μέσο βαθμό στερεοποίησης των δύο άκρων του (τραπεζοειδής
+        // κανόνας). Αν δοθούν πίνακες, γράφονται και οι τιμές ανά κόμβο για το στιγμιότυπο.
+        const integrateColumn = (ix, kz, snapSet, snapStrain, snapUz) => {
+            let S = 0, prevUz = 1;
+            for (let jy=0; jy<ny; jy++) {
+                const i = ix + jy*nx + kz*nxy;
+                const Uz = nodeUz(i);
+                if (jy === 0) S = cache.settlement[i] * Uz;
+                else S += Math.max(0, cache.settlement[i] - cache.settlement[i - nx]) * 0.5 * (Uz + prevUz);
+                prevUz = Uz;
+                if (snapSet) {
+                    snapSet[i] = S;
+                    snapStrain[i] = cache.strain[i] * Uz;
+                    snapUz[i] = cache.du[i] > 0.1 ? Uz * 100 : (cache.dsv[i] > 0.1 ? 100 : 0);
+                }
+            }
+            return S;
+        };
 
         const snaps = [];
         let nextSnapIdx = 0;
@@ -1056,43 +1218,48 @@ const App = () => {
         let currentSec = 0;
 
         const takeSnapshot = (timeSec) => {
-            const snapDu = Float32Array.from(u);
-            const snapStrain = new Float32Array(size);
-            const snapSet = new Float32Array(size);
-            const snapUz = new Float32Array(size);
-
+            const snapSet = new Float32Array(size), snapStrain = new Float32Array(size), snapUz = new Float32Array(size);
             for (let ix=0; ix<nx; ix++) {
-               for (let kz=0; kz<nz; kz++) {
-                  let verticalSet = 0, prevUz = 1;
-                  for (let jy=0; jy<ny; jy++) {
-                      const iIdx = ix + jy*nx + kz*nxy;
-                      const du0 = cache.du[iIdx];
-                      let Uz = 1;
-                      if (du0 > 0.1) {
-                          Uz = Math.max(0, Math.min(1, 1 - (snapDu[iIdx] / du0)));
-                          snapUz[iIdx] = Uz * 100;
-                      } else {
-                          // Χωρίς αρχική υπερπίεση (π.χ. πάνω από τη Γ.Ο.Υ.) η καθίζηση είναι άμεση
-                          snapUz[iIdx] = cache.dsv[iIdx] > 0.1 ? 100 : 0;
-                      }
-
-                      // Συμπίεση του διαστήματος μεταξύ διαδοχικών κόμβων επί τον μέσο βαθμό
-                      // στερεοποίησης των δύο άκρων του (τραπεζοειδής κανόνας)
-                      if (jy === 0) {
-                          verticalSet = cache.settlement[iIdx] * Uz;
-                      } else {
-                          const dS = Math.max(0, cache.settlement[iIdx] - cache.settlement[iIdx - nx]);
-                          verticalSet += dS * 0.5 * (Uz + prevUz);
-                      }
-                      prevUz = Uz;
-                      snapSet[iIdx] = verticalSet;
-                      snapStrain[iIdx] = cache.strain[iIdx] * Uz;
-                  }
-               }
+                for (let kz=0; kz<nz; kz++) integrateColumn(ix, kz, snapSet, snapStrain, snapUz);
             }
-
-            snaps.push({ timeSec, du: snapDu, strain: snapStrain, settlement: snapSet, Uz: snapUz });
+            snaps.push({ timeSec, du: Float32Array.from(u), strain: snapStrain, settlement: snapSet, Uz: snapUz });
         };
+
+        // Σημεία παρακολούθησης: θέση στον κάνναβο με τριγραμμική παρεμβολή. Καθίζηση της
+        // επιφάνειας από τις τέσσερις γειτονικές στήλες, υπερπίεση στο σημείο, μέσος βαθμός
+        // U = S/S∞ της κατακόρυφου και τοπικός Uz = 1 − Δu/Δu0.
+        const locate = (w, min, step, n) => {
+            const f = Math.max(0, Math.min(n - 1.001, (w - min) / step));
+            const i0 = Math.floor(f);
+            return [i0, f - i0];
+        };
+        const monitors = monitorPoints.map(p => {
+            const [ix, tx] = locate(Number(p.x) || 0, minX, stepX, nx);
+            const [iy, ty] = locate(Number(p.y) || 0, minY, stepY, ny);
+            const [kz, tz] = locate(Number(p.z) || 0, 0, stepZ, nz);
+            const at = (arr, a, b, c) => arr[(ix + a) + (iy + b) * nx + (kz + c) * nxy];
+            const tri = (arr) =>
+                ((at(arr,0,0,0) * (1-tx) + at(arr,1,0,0) * tx) * (1-ty) + (at(arr,0,1,0) * (1-tx) + at(arr,1,1,0) * tx) * ty) * (1-tz) +
+                ((at(arr,0,0,1) * (1-tx) + at(arr,1,0,1) * tx) * (1-ty) + (at(arr,0,1,1) * (1-tx) + at(arr,1,1,1) * tx) * ty) * tz;
+            const columns = [[ix, kz, (1-tx) * (1-tz)], [ix+1, kz, tx * (1-tz)], [ix, kz+1, (1-tx) * tz], [ix+1, kz+1, tx * tz]];
+            const top = ny - 1;
+            const S_inf = columns.reduce((s, [cx, cz, w]) => s + w * cache.settlement[cx + top*nx + cz*nxy], 0);
+            const du0 = Math.max(0, tri(cache.du));
+            const surfY = getSurfaceY(Number(p.x) || 0);
+            return { p, tri, columns, S_inf, du0, surfY, data: [] };
+        });
+        const pct = (v) => Math.max(0, Math.min(100, v));
+        const recordMonitors = (timeSec) => {
+            monitors.forEach(m => {
+                const S = m.columns.reduce((s, [cx, cz, w]) => s + w * integrateColumn(cx, cz), 0);
+                const du = Math.max(0, m.tri(u));
+                m.data.push({ timeSec, S, du,
+                    Uz: m.du0 > 0.1 ? pct(100 * (1 - du / m.du0)) : 100,
+                    U: m.S_inf > 1e-6 ? pct(100 * S / m.S_inf) : 0 });
+            });
+        };
+        // Αρχική κατάσταση (t → 0): όλη η πρόσθετη τάση στο νερό των πόρων
+        monitors.forEach(m => m.data.push({ timeSec: TIME_PLOT_MIN_DAYS * 86400, isInitial: true, S: 0, du: m.du0, Uz: m.du0 > 0.1 ? 0 : 100, U: 0 }));
 
         const computeFrame = () => {
             const frameStart = performance.now();
@@ -1101,6 +1268,7 @@ const App = () => {
                 implicitStep(t - currentSec);
                 currentSec = t;
                 stepIdx++;
+                recordMonitors(currentSec);
                 while (nextSnapIdx < numSnaps && currentSec >= snapTargets[nextSnapIdx] * (1 - 1e-9)) {
                     takeSnapshot(snapTargets[nextSnapIdx]);
                     nextSnapIdx++;
@@ -1112,18 +1280,25 @@ const App = () => {
             if (stepIdx < times.length) {
                 setTimeout(computeFrame, 0);
             } else {
+                const histories = {};
+                monitors.forEach(m => {
+                    histories[m.p.id] = { id: m.p.id, name: m.p.name, wx: Number(m.p.x), wy: Number(m.p.y), wz: Number(m.p.z),
+                        surfY: m.surfY, depth: m.surfY - Number(m.p.y), du0: m.du0, S_inf: m.S_inf, data: m.data };
+                });
                 setTimeSnapshots(snaps);
+                setMonitorHistories(histories);
                 setActiveTimeIndex(snaps.length - 1);
                 setIsSolvingTime(false);
-                // Αν δεν απεικονιζόταν τίποτα, δείξε την καθίζηση ώστε να φαίνεται το αποτέλεσμα
-                setActiveStressLayer(l => l === 'none' ? 'settlement' : l);
-                if (typeof onDone === 'function') onDone(snaps);
+                // Μετά την επίλυση: μετάβαση στα αποτελέσματα, με την καθίζηση αν δεν είχε
+                // επιλεγεί άλλο μέγεθος
+                setSelectedResultLayer(l => l === 'none' ? 'settlement' : l);
+                setUiMode('output'); setMode('select'); setCurrentPoints([]); setDragStart(null);
             }
         };
 
         computeFrame();
     }, 100);
-  }, [modelCache, stressData, timeSettings, committedElements, gwtLevel]);
+  }, [modelCache, stressData, calc, calcSettings.maxYears, committedElements, gwtLevel, monitorPoints, getSurfaceY]);
 
   const interpolate3D = useCallback((wx, wy, wz, dataArray) => {
     if (!modelCache || !dataArray) return 0;
@@ -1160,39 +1335,9 @@ const App = () => {
     return c0 * (1 - tz) + c1 * tz;
   }, [modelCache]);
 
-  const getSurfaceY = useCallback((wx) => {
-    if (!stressData || !stressData.surfaceYArray) return 0;
-    const { minX, dx, cols, surfaceYArray } = stressData;
-    let exact_c = (wx - minX - dx/2) / dx;
-    let c1 = Math.max(0, Math.min(cols - 1, Math.floor(exact_c)));
-    let c2 = Math.max(0, Math.min(cols - 1, c1 + 1));
-    let tx = Math.max(0, Math.min(1, exact_c - c1));
-    
-    return surfaceYArray[c1] * (1 - tx) + surfaceYArray[c2] * tx;
-  }, [stressData]);
 
-  // Εξέλιξη στον χρόνο στο σημείο (wx, wy, wz) της τομής: καθίζηση της επιφάνειας πάνω από
-  // το σημείο, υπερπίεση στο σημείο, μέσος βαθμός U = S/S∞ και τοπικός Uz = 1 − Δu/Δu0.
-  // Όλα τα μεγέθη παρεμβάλλονται στον ίδιο κάνναβο με τα στιγμιότυπα της επίλυσης.
-  const buildTimePlot = useCallback((wx, wy, wz, snaps) => {
-    if (!modelCache || !snaps?.length) return null;
-    const surfY = getSurfaceY(wx);
-    const du0 = Math.max(0, interpolate3D(wx, wy, wz, modelCache.cache.du));
-    const S_inf = Math.max(0, interpolate3D(wx, surfY, wz, modelCache.cache.settlement));
-    const pct = (v) => Math.max(0, Math.min(100, v));
-    const point = (timeSec, S, du, isInitial = false) => ({
-      timeSec, isInitial, S, du,
-      Uz: du0 > 0.1 ? pct(100 * (1 - du / du0)) : 100,
-      U: S_inf > 1e-6 ? pct(100 * S / S_inf) : 0,
-    });
-    const data = [point(TIME_PLOT_MIN_DAYS * 86400, 0, du0, true)];
-    snaps.forEach(snap => {
-      data.push(point(snap.timeSec,
-        Math.max(0, interpolate3D(wx, surfY, wz, snap.settlement)),
-        Math.max(0, interpolate3D(wx, wy, wz, snap.du))));
-    });
-    return { wx, wy, wz, surfY, depth: surfY - wy, du0, S_inf, data };
-  }, [modelCache, getSurfaceY, interpolate3D]);
+
+
 
   const getDisplacement = useCallback((wx, wy, wz) => {
     let dataArray = modelCache?.cache.settlement;
@@ -1556,6 +1701,20 @@ const App = () => {
   }, []);
   const resetView = () => { setView({ scale: 20, panX: 150, panY: 50 }); setRotation({ yaw: Math.PI / 4, pitch: Math.PI / 6 }); };
 
+  // Θέση σημείου παρακολούθησης στην τρέχουσα 2D προβολή (τομή: x-y, κάτοψη: x-z)
+  const monitorScreenPos = useCallback((p) => viewMode === 'profile' ? w2s(Number(p.x), Number(p.y)) : w2s(Number(p.x), Number(p.z)), [viewMode, w2s]);
+  // Το σημείο παρακολούθησης που βρίσκεται πιο κοντά στο κλικ (έως 12 px)
+  const pickMonitorPoint = (sx, sy) => {
+    if (show3D) return null;
+    let best = null, bestD = 12;
+    monitorPoints.forEach(p => {
+      const sp = monitorScreenPos(p);
+      const d = Math.hypot(sp.x - sx, sp.y - sy);
+      if (d < bestD) { bestD = d; best = p; }
+    });
+    return best;
+  };
+
   const handlePointerDown = (e) => {
     // Τα γεγονότα του δείκτη συνεχίζουν να έρχονται εδώ και όταν βγει εκτός καμβά,
     // ώστε το σύρσιμο να τελειώνει σωστά στο pointerup
@@ -1568,6 +1727,10 @@ const App = () => {
 
     const wPos = s2w(sx, sy);
     
+    // Κάθε εργαλείο λειτουργεί μόνο στη δική του κατάσταση εργασίας
+    const toolMode = { elogp: 'output', add_point: 'calc' }[mode] || (mode.startsWith('draw_') ? 'input' : null);
+    if (toolMode && toolMode !== uiMode) return;
+
     if (mode === 'elogp') {
         if (!show3D && viewMode === 'profile') {
             const cellData = calculateCellData(wPos.x, wPos.y, profileZ);
@@ -1576,21 +1739,24 @@ const App = () => {
         return;
     }
 
-    // --- TIME PLOT CHART TRIGGER ---
-    if (mode === 'time_plot') {
-        if (!show3D && viewMode === 'profile') {
-            // Μόνο σημεία μέσα σε στρώση εδάφους
-            if (!findLayerAt(committedElements, wPos.x, wPos.y) || wPos.y > getSurfaceY(wPos.x)) return;
-            const { x: wx, y: wy } = wPos;
-            const wz = profileZ;
-
-            if (timeSnapshots?.length) {
-                setTimePlotData(buildTimePlot(wx, wy, wz, timeSnapshots));
-            } else {
-                // Δεν έχει γίνει ακόμα επίλυση: τρέχει τώρα και μετά ανοίγει το διάγραμμα
-                solveConsolidationPDE(snaps => setTimePlotData(buildTimePlot(wx, wy, wz, snaps)));
-            }
+    // CALCULATION: νέο σημείο παρακολούθησης με κλικ μέσα σε στρώση της τομής (στο τρέχον Z)
+    if (mode === 'add_point') {
+        if (!show3D && viewMode === 'profile' && findLayerAt(committedElements, wPos.x, wPos.y)) {
+            const id = `mp${Date.now()}`;
+            const used = monitorPoints.map(p => Number(/^Σ(\d+)$/.exec(p.name || '')?.[1]) || 0);
+            const name = `Σ${Math.max(0, ...used) + 1}`;
+            const r2 = (v) => Math.round(v * 100) / 100;
+            setMonitorPoints(pts => [...pts, { id, name, x: r2(wPos.x), y: r2(wPos.y), z: r2(profileZ) }]);
+            setSelectedPointId(id);
         }
+        return;
+    }
+
+    // CALCULATION: επιλογή σημείου · OUTPUT: κλικ σε σημείο ανοίγει το διάγραμμά του στον χρόνο
+    if (mode === 'select' && uiMode !== 'input') {
+        const hit = pickMonitorPoint(sx, sy);
+        if (uiMode === 'calc') setSelectedPointId(hit?.id ?? null);
+        else if (hit && monitorHistories?.[hit.id]) setTimePlotData(monitorHistories[hit.id]);
         return;
     }
 
@@ -1680,7 +1846,9 @@ const App = () => {
     if (isPanning) { setView(p => ({ ...p, panX: p.panX + (e.clientX - lastPointerPos.x), panY: p.panY - (e.clientY - lastPointerPos.y) })); setLastPointerPos({ x: e.clientX, y: e.clientY }); setHoverCursor('grabbing'); return; }
     if (show3D && isRotating3D) { setRotation(p => ({ yaw: p.yaw - (e.clientX - lastPointerPos.x) * 0.003, pitch: Math.max(-Math.PI/2.2, Math.min(Math.PI/2.2, p.pitch + (e.clientY - lastPointerPos.y) * 0.003)) })); setLastPointerPos({ x: e.clientX, y: e.clientY }); setHoverCursor('grabbing'); return; }
 
-    if (mode === 'elogp' || mode === 'time_plot') cur = 'crosshair';
+    if (mode === 'elogp' || mode === 'add_point') cur = 'crosshair';
+    else if (mode === 'pan') cur = 'grab';
+    else if (mode === 'select' && uiMode !== 'input' && pickMonitorPoint(sx, sy)) cur = 'pointer';
     setHoverCursor(cur);
 
     const wPos = s2w(sx, sy);
@@ -1944,8 +2112,13 @@ const finishPolygon = (e) => {
           });
       }
 
+      // Σημεία παρακολούθησης (CALCULATION και OUTPUT)
+      if (uiMode !== 'input') {
+        monitorPoints.forEach(p => facesToDraw.push({ type: 'marker', name: p.name, selected: p.id === selectedPointId, p: { x: Number(p.x), y: Number(p.y), z: Number(p.z) } }));
+      }
+
       facesToDraw.forEach(face => {
-        if (face.isGrid || face.type === 'tick') {
+        if (face.isGrid || face.type === 'tick' || face.type === 'marker') {
           face.proj1 = proj3D((face.p||face.p1).x, (face.p||face.p1).y, (face.p||face.p1).z);
           if (face.p2) face.proj2 = proj3D(face.p2.x, face.p2.y, face.p2.z);
           face.avgZ = face.proj1.depth;
@@ -1960,7 +2133,8 @@ const finishPolygon = (e) => {
           let z = f.avgZ;
           if (f.type === 'image_plane') z += 10000; 
           else if (f.type === 'face' || f.type === 'drain') z += 15000; 
-          else if (f.type === 'tick' || f.type === 'axis') z += 20000; 
+          else if (f.type === 'tick' || f.type === 'axis') z += 20000;
+          else if (f.type === 'marker') z += 25000;
           else if (f.type === 'deformed_line') z += 30000; 
           return z;
         };
@@ -1973,6 +2147,8 @@ const finishPolygon = (e) => {
         } else if (face.type === 'axis') {
           ctx.beginPath(); ctx.moveTo(face.projPoints[0].x, face.projPoints[0].y); ctx.lineTo(face.projPoints[1].x, face.projPoints[1].y); ctx.strokeStyle = face.color; ctx.lineWidth = 4; ctx.stroke();
           ctx.beginPath(); ctx.arc(face.projPoints[1].x, face.projPoints[1].y, 4, 0, Math.PI*2); ctx.fillStyle = face.color; ctx.fill();
+        } else if (face.type === 'marker') {
+          drawMonitorMarker(ctx, face.proj1.x, face.proj1.y, face.name, { selected: face.selected });
         } else if (face.type === 'tick') {
           ctx.fillStyle = face.axis === 'X' ? '#ef4444' : face.axis === 'Y' ? '#22c55e' : '#06b6d4';
           ctx.beginPath(); ctx.arc(face.proj1.x, face.proj1.y, 3, 0, Math.PI * 2); ctx.fill();
@@ -2309,7 +2485,36 @@ const finishPolygon = (e) => {
 
       }
 
-      ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, canvas.width, RULER_W); ctx.fillRect(0, 0, RULER_W, canvas.height); 
+      // CALCULATION: γραμμές του καννάβου επίλυσης (δείχνουν τα Δx, Δy, Δz)
+      if (uiMode === 'calc' && modelCache) {
+        const { nx, ny, nz, minX: gx0, minY: gy0, stepX, stepY, stepZ } = modelCache;
+        const xEnd = gx0 + (nx - 1) * stepX;
+        const seg = (x1, y1, x2, y2) => { const a = w2s(x1, y1), b = w2s(x2, y2); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); };
+        ctx.save(); ctx.strokeStyle = 'rgba(15, 23, 42, 0.22)'; ctx.lineWidth = 1; ctx.beginPath();
+        if (viewMode === 'profile') {
+          const yTop = gy0 + (ny - 1) * stepY;
+          for (let i = 0; i < nx; i++) seg(gx0 + i * stepX, gy0, gx0 + i * stepX, yTop);
+          for (let j = 0; j < ny; j++) seg(gx0, gy0 + j * stepY, xEnd, gy0 + j * stepY);
+        } else {
+          const zEnd = (nz - 1) * stepZ;
+          for (let i = 0; i < nx; i++) seg(gx0 + i * stepX, 0, gx0 + i * stepX, zEnd);
+          for (let k = 0; k < nz; k++) seg(gx0, k * stepZ, xEnd, k * stepZ);
+        }
+        ctx.stroke(); ctx.restore();
+      }
+
+      // Σημεία παρακολούθησης (CALCULATION και OUTPUT)· στην τομή, όσα δεν βρίσκονται
+      // στο τρέχον Z σχεδιάζονται αχνά, με τη θέση τους Z
+      if (uiMode !== 'input') {
+        const tolZ = modelCache ? modelCache.stepZ / 2 : 0.5;
+        monitorPoints.forEach(p => {
+          const sp = monitorScreenPos(p);
+          const offPlane = viewMode === 'profile' && Math.abs(Number(p.z) - profileZ) > tolZ;
+          drawMonitorMarker(ctx, sp.x, sp.y, offPlane ? `${p.name} (Z=${Number(p.z)})` : p.name, { selected: p.id === selectedPointId, dimmed: offPlane });
+        });
+      }
+
+      ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, canvas.width, RULER_W); ctx.fillRect(0, 0, RULER_W, canvas.height);
       ctx.strokeStyle = '#cbd5e1'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(0, RULER_W); ctx.lineTo(canvas.width, RULER_W); ctx.moveTo(RULER_W, 0); ctx.lineTo(RULER_W, canvas.height); ctx.stroke();
       ctx.fillStyle = '#64748b'; ctx.font = '10px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
       for (let x = start1; x <= end1; x++) { const sp = w2s(x, 0); if (sp.x > RULER_W) { ctx.beginPath(); if (x % 5 === 0) { ctx.moveTo(sp.x, RULER_W - 8); ctx.lineTo(sp.x, RULER_W); ctx.fillText(x.toString(), sp.x, 2); } else { ctx.moveTo(sp.x, RULER_W - 4); ctx.lineTo(sp.x, RULER_W); } ctx.stroke(); } }
@@ -2384,7 +2589,7 @@ const finishPolygon = (e) => {
       ctx.fillStyle = '#334155';
       ctx.fill();
     }
-  }, [elements, currentPoints, dragStart, selectedId, mode, viewMode, canvasSize, view, mousePos, show3D, projectSettings, rotation, heatmaps, heatmapLevels, stressData, activeStressLayer, gwtLevel, colorScale, colorLUT, contourImg, profileZ, showLabels, showDeformedMesh, meshMagnification, textures3D, deformedQuads3D, deformedQuads2D, bounds, show3DModels, heatmapStyle, s2w, w2s]);
+  }, [elements, currentPoints, dragStart, selectedId, mode, viewMode, canvasSize, view, mousePos, show3D, projectSettings, rotation, heatmaps, heatmapLevels, stressData, activeStressLayer, gwtLevel, colorScale, colorLUT, contourImg, profileZ, showLabels, showDeformedMesh, meshMagnification, textures3D, deformedQuads3D, deformedQuads2D, bounds, show3DModels, heatmapStyle, s2w, w2s, uiMode, modelCache, monitorPoints, selectedPointId, monitorScreenPos]);
 
 const updateSelectedProp = (key, value) => { 
       if (selectedId) {
@@ -2392,7 +2597,62 @@ const updateSelectedProp = (key, value) => {
           setElements(newArray);
           setCommittedElements(newArray);
       }
-  };  const selectedElement = elements.find(e => e.id === selectedId);
+  };
+  const selectedElement = elements.find(e => e.id === selectedId);
+
+  // Αλλαγή κατάστασης εργασίας: κάθε κατάσταση έχει τα δικά της εργαλεία
+  const switchUiMode = (m) => {
+    setUiMode(m); setMode('select'); setCurrentPoints([]); setDragStart(null);
+  };
+
+  // Σημεία παρακολούθησης
+  const updatePoint = (id, key, value) => setMonitorPoints(pts => pts.map(p => p.id === id ? { ...p, [key]: value } : p));
+  const deletePoint = (id) => { setMonitorPoints(pts => pts.filter(p => p.id !== id)); if (selectedPointId === id) setSelectedPointId(null); };
+  const addPointAtCenter = () => {
+    const used = monitorPoints.map(p => Number(/^Σ(\d+)$/.exec(p.name || '')?.[1]) || 0);
+    const id = `mp${Date.now()}`;
+    const r2 = (v) => Math.round(v * 100) / 100;
+    setMonitorPoints(pts => [...pts, { id, name: `Σ${Math.max(0, ...used) + 1}`, x: r2((bounds.minX + bounds.maxX) / 2), y: r2((bounds.minY + bounds.maxY) / 2), z: r2(profileZ) }]);
+    setSelectedPointId(id);
+  };
+
+  // Χρονικά βήματα της επίλυσης για τις τρέχουσες ρυθμίσεις (πληροφορία στο CALCULATION)
+  const schedule = useMemo(() => buildTimeSchedule(calc.maxYears * 365.25 * 86400, calc.snapshots, 86400, calc.stepsPerDecade), [calc]);
+  const totalNodes = calc.nx * calc.ny * calc.nz;
+
+  // Εξαγωγή του ιστορικού ενός σημείου σε CSV (διαχωριστικό «;», δεκαδικά με κόμμα, για Excel)
+  const downloadHistoryCsv = (h) => {
+    const num = (v, d) => v.toFixed(d).replace('.', ',');
+    const lines = [
+      `Σημείο;${h.name};X (m);${num(h.wx, 2)};Y (m);${num(h.wy, 2)};Z (m);${num(h.wz, 2)};Δu0 (kPa);${num(h.du0, 2)};S∞ (mm);${num(h.S_inf, 2)}`,
+      '',
+      't (s);t (ημέρες);S (mm);Δu (kPa);U (%);Uz (%)',
+      ...h.data.map(d => [d.isInitial ? '0' : num(d.timeSec, 0), d.isInitial ? '0' : num(d.timeSec / 86400, 5), num(d.S, 3), num(d.du, 3), num(d.U, 2), num(d.Uz, 2)].join(';')),
+    ];
+    const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `CONS3D_${h.name}.csv`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  // Οδηγία για το τρέχον εργαλείο, στο κάτω μέρος του καμβά
+  const toolHint = (() => {
+    if (mode === 'pan') return 'Σύρσιμο για μετατόπιση της προβολής';
+    if (show3D) return 'Σύρσιμο για περιστροφή · δεξί κλικ και σύρσιμο για μετατόπιση · ροδέλα για zoom';
+    if (['draw_layer', 'draw_embankment', 'draw_drainage'].includes(mode)) return 'Κλικ για κάθε κορυφή · δεξί κλικ για ολοκλήρωση';
+    if (['draw_rect', 'draw_circle', 'draw_3d_embankment'].includes(mode)) return 'Σύρσιμο στην κάτοψη για σχεδίαση';
+    if (mode === 'add_point') return `Κλικ μέσα στο έδαφος της τομής για νέο σημείο (Z = ${profileZ} m)`;
+    if (mode === 'elogp') return "Κλικ στην τομή για ανάλυση e-log(p') του στοιχείου";
+    if (uiMode === 'calc') return 'Κλικ σε σημείο παρακολούθησης για επιλογή';
+    if (uiMode === 'output') return monitorHistories ? 'Κλικ σε σημείο παρακολούθησης για το διάγραμμα χρόνου' : 'Τιμή του μεγέθους στη θέση του δείκτη (πάνω δεξιά)';
+    return 'Κλικ σε στοιχείο για επιλογή · σύρσιμο κορυφής για μετακίνηση';
+  })();
+
+  // Κλάσεις κουμπιού εργαλείου στην αριστερή μπάρα
+  const TOOL_TONES = { blue: 'bg-blue-100 text-blue-600', emerald: 'bg-emerald-100 text-emerald-600', teal: 'bg-teal-100 text-teal-700', orange: 'bg-orange-100 text-orange-600' };
+  const toolBtn = (active, tone = 'blue') => `p-3 rounded-lg transition-colors ${active ? TOOL_TONES[tone] : 'hover:bg-gray-100 text-gray-600'}`;
 
   return (
     <div className="flex flex-col h-screen bg-gray-50 font-sans text-gray-800">
@@ -2404,7 +2664,7 @@ const updateSelectedProp = (key, value) => {
             <div className="flex justify-end gap-3">
               <button onClick={() => setShowResetModal(false)} className="px-4 py-2 text-sm text-gray-700 bg-gray-100 hover:bg-gray-200 rounded font-semibold">Άκυρο</button>
 
-              <button onClick={() => { const fresh = structuredClone(defaultElements); setElements(fresh); setCommittedElements(fresh); setSelectedId(null); setProjectSettings({ type: '3d', length: 50 }); setGwtLevel(20); setShowResetModal(false); }} className="px-4 py-2 text-sm text-white bg-red-600 hover:bg-red-700 rounded font-semibold">Επαναφορά</button>
+              <button onClick={() => { const fresh = structuredClone(defaultElements); setElements(fresh); setCommittedElements(fresh); setSelectedId(null); setProjectSettings({ type: '3d', length: 50 }); setGwtLevel(20); setCalcSettings(DEFAULT_CALC); setMonitorPoints(structuredClone(DEFAULT_MONITOR_POINTS)); setSelectedPointId(null); setProblemFileName(null); setUiMode('input'); setMode('select'); setShowResetModal(false); }} className="px-4 py-2 text-sm text-white bg-red-600 hover:bg-red-700 rounded font-semibold">Επαναφορά</button>
             </div>
           </div>
         </div>
@@ -2479,13 +2739,16 @@ const updateSelectedProp = (key, value) => {
               <div className="bg-white rounded-xl shadow-2xl w-[740px] max-w-[95%] max-h-[95vh] overflow-y-auto flex flex-col">
                   <div className="bg-slate-800 text-white px-5 py-3 flex justify-between items-center">
                       <div className="flex flex-col">
-                          <h3 className="text-lg font-bold flex items-center gap-2"><LineChart size={20}/> Εξέλιξη Στερεοποίησης στον Χρόνο</h3>
+                          <h3 className="text-lg font-bold flex items-center gap-2"><LineChart size={20}/> Σημείο {timePlotData.name}: Εξέλιξη στον Χρόνο</h3>
                           <span className="text-xs text-slate-300">
-                              Σημείο: X={timePlotData.wx.toFixed(2)} m, Y={timePlotData.wy.toFixed(2)} m, Z={timePlotData.wz.toFixed(2)} m
+                              X={timePlotData.wx.toFixed(2)} m, Y={timePlotData.wy.toFixed(2)} m, Z={timePlotData.wz.toFixed(2)} m
                               {' '}· βάθος {timePlotData.depth.toFixed(2)} m · Δu₀ = {timePlotData.du0.toFixed(1)} kPa · S∞ = {timePlotData.S_inf.toFixed(1)} mm
                           </span>
                       </div>
-                      <button onClick={() => setTimePlotData(null)} className="p-1 hover:bg-slate-700 rounded transition-colors"><X size={24} /></button>
+                      <div className="flex items-center gap-2">
+                          <button onClick={() => downloadHistoryCsv(timePlotData)} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-slate-700 hover:bg-slate-600 rounded transition-colors" title="Αποθήκευση των τιμών σε αρχείο CSV (Excel)"><FileDown size={16} /> CSV</button>
+                          <button onClick={() => setTimePlotData(null)} className="p-1 hover:bg-slate-700 rounded transition-colors"><X size={24} /></button>
+                      </div>
                   </div>
 
                   <div className="px-6 pt-4 pb-5">
@@ -2512,64 +2775,96 @@ const updateSelectedProp = (key, value) => {
             </div>
         </div>
         
-        <div className="flex items-center gap-4">
-            <div className="text-sm text-slate-300 hidden md:block mr-4">Ανάπτυξη - Προσομοίωση 3D Υπολογισμού Καθιζήσεων Στερεοποίησης & Χρονικής Εξέλιξής τους</div>
-            <div className="flex bg-slate-700 rounded-lg p-1">
-              <button onClick={handleExport} className="p-2 text-slate-200 hover:text-white hover:bg-slate-600 rounded transition-colors" title="Αποθήκευση/Εξαγωγή (JSON)"><Download size={18} /></button>
-              <label className="p-2 text-slate-200 hover:text-white hover:bg-slate-600 rounded transition-colors cursor-pointer" title="Φόρτωση/Εισαγωγή (JSON)">
-                <Upload size={18} />
-                <input type="file" accept=".json" onChange={handleImport} className="hidden" />
+        {/* Οι τρεις καταστάσεις εργασίας */}
+        <nav className="flex bg-slate-900/70 rounded-xl p-1 gap-1" aria-label="Κατάσταση εργασίας">
+          {[
+            { key: 'input', num: 1, label: 'INPUT', sub: 'Γεωμετρία · φορτία · όρια' },
+            { key: 'calc', num: 2, label: 'CALCULATION', sub: 'Κάνναβος · χρόνος · σημεία' },
+            { key: 'output', num: 3, label: 'OUTPUT', sub: 'Αποτελέσματα' },
+          ].map(t => (
+            <button key={t.key} onClick={() => switchUiMode(t.key)} aria-pressed={uiMode === t.key}
+              className={`flex items-center gap-2.5 px-4 py-1.5 rounded-lg transition-colors text-left ${uiMode === t.key ? 'bg-white text-slate-900 shadow' : 'text-slate-300 hover:bg-slate-700 hover:text-white'}`}>
+              <span className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold ${uiMode === t.key ? 'bg-blue-600 text-white' : 'bg-slate-600 text-slate-200'}`}>{t.num}</span>
+              <span className="flex flex-col leading-tight">
+                <span className="text-sm font-bold tracking-wide flex items-center gap-1.5">
+                  {t.label}
+                  {t.key === 'output' && timeSnapshots && <span className="w-2 h-2 rounded-full bg-emerald-500" title="Υπάρχει λύση στον χρόνο"></span>}
+                </span>
+                <span className={`text-[10px] ${uiMode === t.key ? 'text-slate-500' : 'text-slate-400'}`}>{t.sub}</span>
+              </span>
+            </button>
+          ))}
+        </nav>
+
+        {/* Αρχείο προβλήματος: INPUT και ρυθμίσεις CALCULATION, χωρίς αποτελέσματα */}
+        <div className="flex items-center gap-3">
+            {problemFileName && <span className="text-xs text-slate-300 max-w-[170px] truncate" title={`Αρχείο προβλήματος: ${problemFileName}`}>{problemFileName}</span>}
+            <div className="flex bg-slate-700 rounded-lg p-1 gap-1">
+              <button onClick={saveProblem} className="flex items-center gap-1.5 px-2.5 py-1.5 text-sm text-slate-100 hover:bg-slate-600 rounded transition-colors" title="Αποθήκευση του προβλήματος σε αρχείο (INPUT και ρυθμίσεις CALCULATION, χωρίς αποτελέσματα)"><Save size={16} /> Αποθήκευση</button>
+              <label className="flex items-center gap-1.5 px-2.5 py-1.5 text-sm text-slate-100 hover:bg-slate-600 rounded transition-colors cursor-pointer" title="Φόρτωση προβλήματος από αρχείο">
+                <FolderOpen size={16} /> Φόρτωση
+                <input type="file" accept=".json,application/json" onChange={loadProblem} className="hidden" />
               </label>
-              <div className="w-px bg-slate-600 mx-1 my-1"></div>
-              <button onClick={() => setShowResetModal(true)} className="p-2 text-slate-200 hover:text-red-400 hover:bg-slate-600 rounded transition-colors" title="Επαναφορά (Reset)"><RotateCcw size={18} /></button>
+              <div className="w-px bg-slate-600 mx-0.5 my-1"></div>
+              <button onClick={() => setShowResetModal(true)} className="p-2 text-slate-200 hover:text-red-400 hover:bg-slate-600 rounded transition-colors" title="Νέο πρόβλημα: επαναφορά στο προεπιλεγμένο μοντέλο"><RotateCcw size={16} /></button>
             </div>
         </div>
       </header>
 
       <div className="flex flex-1 overflow-hidden">
-        {/* LEFT TOOLBAR */}
-        <div className="w-16 bg-white border-r border-gray-200 flex flex-col items-center py-4 gap-4 shadow-sm z-10 shrink-0 overflow-y-auto">
-          <button onClick={() => setMode('select')} className={`p-3 rounded-lg transition-colors ${mode === 'select' ? 'bg-blue-100 text-blue-600' : 'hover:bg-gray-100 text-gray-600'}`} title="Επιλογή & Μετακίνηση"><MousePointer2 size={24} /></button>
-          <button onClick={() => setMode('pan')} className={`p-3 rounded-lg transition-colors ${mode === 'pan' ? 'bg-blue-100 text-blue-600' : 'hover:bg-gray-100 text-gray-600'}`} title="Μετατόπιση Καμβά (Pan)"><Hand size={24} /></button>
-          
-          <div className="w-8 h-px bg-gray-300 my-1"></div>
-          
-          <div className="flex flex-col items-center gap-2 opacity-100" style={{ display: viewMode === 'profile' && !show3D ? 'flex' : 'none' }}>
-            <span className="text-[10px] font-bold text-gray-400 uppercase text-center leading-tight">Τομη<br/>(X-Y)</span>
-            <button onClick={() => setMode('draw_layer')} className={`p-3 rounded-lg transition-colors ${mode === 'draw_layer' ? 'bg-blue-100 text-blue-600' : 'hover:bg-gray-100 text-gray-600'}`} title="Σχεδίαση Στρώσης"><Square size={24} /></button>
-            <button onClick={() => setMode('draw_embankment')} className={`p-3 rounded-lg transition-colors ${mode === 'draw_embankment' ? 'bg-blue-100 text-blue-600' : 'hover:bg-gray-100 text-gray-600'}`} title="Σχεδίαση 2D Επιχώματος (Λωρίδα)"><Pencil size={24} /></button>
-            <button onClick={() => setMode('draw_drainage')} className={`p-3 rounded-lg transition-colors ${mode === 'draw_drainage' ? 'bg-blue-100 text-blue-600' : 'hover:bg-gray-100 text-gray-600'}`} title="Σχεδίαση Οριακής Συνθήκης (Στράγγιση u=0)"><Waves size={24} /></button>
-            <div className="w-6 h-px bg-gray-200 my-1"></div>
-            <button onClick={() => setMode('elogp')} className={`p-3 rounded-lg transition-colors ${mode === 'elogp' ? 'bg-orange-100 text-orange-600' : 'hover:bg-gray-100 text-gray-600'}`} title="Σημειακή Ανάλυση e-log(p') (Κλικ στο πλέγμα)"><Calculator size={24} /></button>
-            <button onClick={() => setMode('time_plot')} className={`p-3 rounded-lg transition-colors ${mode === 'time_plot' ? 'bg-amber-100 text-amber-600' : 'hover:bg-gray-100 text-gray-600'}`} title="Σημειακή Ανάλυση Στερεοποίησης στον Χρόνο (Κλικ στο πλέγμα)"><LineChart size={24} /></button>
-          </div>
+        {/* LEFT TOOLBAR: εργαλεία της τρέχουσας κατάστασης εργασίας */}
+        <div className="w-16 bg-white border-r border-gray-200 flex flex-col items-center py-4 gap-2 shadow-sm z-10 shrink-0 overflow-y-auto">
+          {uiMode === 'input' && (
+            <>
+              <button onClick={() => setMode('select')} className={toolBtn(mode === 'select')} title="Επιλογή & μετακίνηση στοιχείων"><MousePointer2 size={24} /></button>
+              <div className="w-8 h-px bg-gray-300 my-1"></div>
+              {!show3D && viewMode === 'profile' && (
+                <>
+                  <span className="text-[10px] font-bold text-gray-400 uppercase text-center leading-tight">Τομη<br/>(X-Y)</span>
+                  <button onClick={() => setMode('draw_layer')} className={toolBtn(mode === 'draw_layer')} title="Σχεδίαση στρώσης εδάφους"><Square size={24} /></button>
+                  <button onClick={() => setMode('draw_embankment')} className={toolBtn(mode === 'draw_embankment')} title="Σχεδίαση 2D επιχώματος (λωρίδα)"><Pencil size={24} /></button>
+                  <button onClick={() => setMode('draw_drainage')} className={toolBtn(mode === 'draw_drainage')} title="Σχεδίαση στράγγισης (οριακή συνθήκη u = 0)"><Waves size={24} /></button>
+                </>
+              )}
+              {!show3D && viewMode === 'plan' && (
+                <>
+                  <span className="text-[10px] font-bold text-gray-400 uppercase text-center leading-tight">Κατοψη<br/>(X-Z)</span>
+                  <button onClick={() => setMode('draw_rect')} className={toolBtn(mode === 'draw_rect', 'emerald')} title="Ορθογωνικό φορτίο (σύρσιμο)"><LayoutTemplate size={24} /></button>
+                  <button onClick={() => setMode('draw_circle')} className={toolBtn(mode === 'draw_circle', 'emerald')} title="Κυκλικό φορτίο / δεξαμενή"><CircleIcon size={24} /></button>
+                  <button onClick={() => setMode('draw_3d_embankment')} className={toolBtn(mode === 'draw_3d_embankment', 'emerald')} title="3D επίχωμα"><Scan size={24} /></button>
+                </>
+              )}
+              <div className="w-8 h-px bg-gray-300 my-1"></div>
+              <button onClick={() => { if (selectedId) { const newArray = elements.filter(e => e.id !== selectedId); setElements(newArray); setCommittedElements(newArray); setSelectedId(null); } }} disabled={!selectedId} className="p-3 rounded-lg hover:bg-red-50 text-red-500 transition-colors disabled:opacity-30 disabled:hover:bg-transparent" title="Διαγραφή επιλεγμένου στοιχείου">
+                <Trash2 size={24} />
+              </button>
+            </>
+          )}
 
-          <div className="flex flex-col items-center gap-2" style={{ display: viewMode === 'plan' && !show3D ? 'flex' : 'none' }}>
-            <span className="text-[10px] font-bold text-gray-400 uppercase text-center leading-tight">Κατοψη<br/>(X-Z)</span>
-            <button onClick={() => setMode('draw_rect')} className={`p-3 rounded-lg transition-colors ${mode === 'draw_rect' ? 'bg-emerald-100 text-emerald-600' : 'hover:bg-gray-100 text-gray-600'}`} title="Ορθογωνικό Φορτίο (Σύρσιμο)"><LayoutTemplate size={24} /></button>
-            <button onClick={() => setMode('draw_circle')} className={`p-3 rounded-lg transition-colors ${mode === 'draw_circle' ? 'bg-emerald-100 text-emerald-600' : 'hover:bg-gray-100 text-gray-600'}`} title="Κυκλικό Φορτίο / Δεξαμενή"><CircleIcon size={24} /></button>
-            <button onClick={() => setMode('draw_3d_embankment')} className={`p-3 rounded-lg transition-colors ${mode === 'draw_3d_embankment' ? 'bg-emerald-100 text-emerald-600' : 'hover:bg-gray-100 text-gray-600'}`} title="3D Επίχωμα"><Scan size={24} /></button>
-          </div>
+          {uiMode === 'calc' && (
+            <>
+              <button onClick={() => setMode('select')} className={toolBtn(mode === 'select', 'teal')} title="Επιλογή σημείου παρακολούθησης"><MousePointer2 size={24} /></button>
+              <button onClick={() => setMode('add_point')} disabled={show3D || viewMode !== 'profile'} className={`${toolBtn(mode === 'add_point', 'teal')} disabled:opacity-30`} title={show3D || viewMode !== 'profile' ? 'Νέο σημείο: διαθέσιμο στην τομή X-Y' : 'Νέο σημείο παρακολούθησης (κλικ στην τομή)'}>
+                <span className="relative block"><Crosshair size={24} /><Plus size={12} className="absolute -right-1.5 -bottom-1 bg-white rounded-full" strokeWidth={3} /></span>
+              </button>
+              <div className="w-8 h-px bg-gray-300 my-1"></div>
+              <button onClick={() => selectedPointId && deletePoint(selectedPointId)} disabled={!selectedPointId} className="p-3 rounded-lg hover:bg-red-50 text-red-500 transition-colors disabled:opacity-30 disabled:hover:bg-transparent" title="Διαγραφή επιλεγμένου σημείου">
+                <Trash2 size={24} />
+              </button>
+            </>
+          )}
 
-          <div className="w-8 h-px bg-gray-300 my-2"></div>
-          <button onClick={() => setShow3D(!show3D)} className={`p-3 rounded-lg transition-colors ${show3D ? 'bg-purple-100 text-purple-600 shadow-inner' : 'hover:bg-gray-100 text-gray-600'}`} title="3D Επισκόπηση & Περιστροφή"><Box size={24} /></button>
-          
-          <div className="w-8 h-px bg-gray-300 my-2"></div>
-          <button onClick={() => { if (selectedId) { const newArray = elements.filter(e => e.id !== selectedId); setElements(newArray); setCommittedElements(newArray); setSelectedId(null); } }} className="p-3 rounded-lg hover:bg-red-50 text-red-500 transition-colors" title="Διαγραφή Επιλεγμένου">
-            <Trash2 size={24} />
-          </button>
+          {uiMode === 'output' && (
+            <>
+              <button onClick={() => setMode('select')} className={toolBtn(mode === 'select')} title="Ανάγνωση τιμών · κλικ σε σημείο παρακολούθησης για το διάγραμμα χρόνου"><MousePointer2 size={24} /></button>
+              <button onClick={() => setMode('elogp')} disabled={show3D || viewMode !== 'profile'} className={`${toolBtn(mode === 'elogp', 'orange')} disabled:opacity-30`} title="Ανάλυση e-log(p') στοιχείου (κλικ στην τομή)"><Calculator size={24} /></button>
+            </>
+          )}
         </div>
 
         {/* MAIN CANVAS AREA */}
         <div className="flex-1 flex flex-col relative bg-slate-100 overflow-hidden">
-          {!show3D && (
-            <div className="absolute top-10 left-[55%] transform -translate-x-1/2 flex bg-white rounded-lg shadow-md z-20 border border-gray-200 overflow-hidden">
-              <button onClick={() => {setViewMode('profile'); setMode('select');}} className={`px-4 py-2 text-sm font-semibold transition-colors ${viewMode === 'profile' ? 'bg-blue-600 text-white' : 'text-gray-600 hover:bg-gray-50'}`}>Τομή (X-Y)</button>
-              <button onClick={() => {setViewMode('plan'); setMode('select');}} className={`px-4 py-2 text-sm font-semibold transition-colors ${viewMode === 'plan' ? 'bg-emerald-600 text-white' : 'text-gray-600 hover:bg-gray-50'}`}>Κάτοψη (X-Z)</button>
-            </div>
-          )}
-
-          <div 
+          <div
             className="flex-1 relative w-full h-full"
             onPointerDown={handlePointerDown}
             onPointerMove={handlePointerMove}
@@ -2584,15 +2879,42 @@ const updateSelectedProp = (key, value) => {
               className="absolute top-0 left-0 w-full h-full touch-none outline-none"
             />
 
-            {/* Τα κλικ στα κουμπιά zoom δεν πρέπει να φτάνουν στον καμβά (π.χ. να προσθέτουν κορυφή πολυγώνου) */}
-            <div className="absolute top-8 left-32 flex items-center bg-white p-2 rounded-lg shadow-md gap-2 opacity-90 hover:opacity-100 transition-opacity" onPointerDown={(e) => e.stopPropagation()} onPointerUp={(e) => e.stopPropagation()} onContextMenu={(e) => e.stopPropagation()}>
-              <button onClick={() => handleZoom(1.1)} className="p-2 hover:bg-gray-100 rounded text-gray-700"><ZoomIn size={20} /></button>
-              <button onClick={() => handleZoom(0.9)} className="p-2 hover:bg-gray-100 rounded text-gray-700"><ZoomOut size={20} /></button>
-              <button onClick={resetView} className="p-2 hover:bg-gray-100 rounded text-gray-700"><Maximize size={20} /></button>
+            {/* Μπάρα προβολής: ίδια σε όλες τις καταστάσεις εργασίας. Τα κλικ της δεν φτάνουν στον καμβά */}
+            <div className="absolute top-8 left-28 z-20 flex flex-wrap items-center gap-1 bg-white/95 p-1.5 rounded-lg shadow-md border border-gray-200" onPointerDown={(e) => e.stopPropagation()} onPointerUp={(e) => e.stopPropagation()} onContextMenu={(e) => e.stopPropagation()}>
+              <div className="flex rounded-md overflow-hidden border border-gray-200">
+                {[['profile', 'Τομή X-Y'], ['plan', 'Κάτοψη X-Z'], ['3d', '3D']].map(([v, label]) => {
+                  const active = v === '3d' ? show3D : (!show3D && viewMode === v);
+                  return (
+                    <button key={v} aria-pressed={active}
+                      onClick={() => { if (v === '3d') setShow3D(true); else { setShow3D(false); setViewMode(v); } setMode('select'); setCurrentPoints([]); setDragStart(null); }}
+                      className={`px-3 py-1.5 text-sm font-semibold transition-colors ${active ? 'bg-blue-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}>{label}</button>
+                  );
+                })}
+              </div>
               <div className="w-px h-6 bg-gray-300 mx-1"></div>
-              <button onClick={() => setSnapToGrid(!snapToGrid)} className={`p-2 rounded ${snapToGrid ? 'bg-blue-50 text-blue-600' : 'hover:bg-gray-100 text-gray-700'}`} title="Έλξη σε Κάνναβο"><Grid3X3 size={20} /></button>
+              <button onClick={() => handleZoom(1.1)} className="p-1.5 hover:bg-gray-100 rounded text-gray-700" title="Μεγέθυνση"><ZoomIn size={18} /></button>
+              <button onClick={() => handleZoom(0.9)} className="p-1.5 hover:bg-gray-100 rounded text-gray-700" title="Σμίκρυνση"><ZoomOut size={18} /></button>
+              <button onClick={resetView} className="p-1.5 hover:bg-gray-100 rounded text-gray-700" title="Επαναφορά προβολής"><Maximize size={18} /></button>
+              <button onClick={() => setMode(m => m === 'pan' ? 'select' : 'pan')} aria-pressed={mode === 'pan'} className={`p-1.5 rounded ${mode === 'pan' ? 'bg-blue-50 text-blue-600' : 'hover:bg-gray-100 text-gray-700'}`} title="Μετατόπιση προβολής (pan)"><Hand size={18} /></button>
+              <button onClick={() => setSnapToGrid(!snapToGrid)} aria-pressed={snapToGrid} className={`p-1.5 rounded ${snapToGrid ? 'bg-blue-50 text-blue-600' : 'hover:bg-gray-100 text-gray-700'}`} title="Έλξη σε κάνναβο 1 m"><Grid3X3 size={18} /></button>
+              <button onClick={() => setShowLabels(!showLabels)} aria-pressed={showLabels} className={`p-1.5 rounded ${showLabels ? 'bg-blue-50 text-blue-600' : 'hover:bg-gray-100 text-gray-700'}`} title="Ετικέτες όλων των στοιχείων"><Tag size={18} /></button>
+              {show3D && (
+                <button onClick={() => setShow3DModels(!show3DModels)} aria-pressed={show3DModels} className={`p-1.5 rounded ${show3DModels ? 'bg-blue-50 text-blue-600' : 'hover:bg-gray-100 text-gray-700'}`} title="Εμφάνιση φορτίων και επιχωμάτων στο 3D">{show3DModels ? <Eye size={18} /> : <EyeOff size={18} />}</button>
+              )}
+              {!show3D && viewMode === 'profile' && (
+                <>
+                  <div className="w-px h-6 bg-gray-300 mx-1"></div>
+                  <label className="flex items-center gap-2 px-1 text-xs font-semibold text-emerald-800" title="Θέση της τομής X-Y κατά μήκος του άξονα Z">
+                    Τομή στο Z
+                    <input type="range" min="0" max={projectSettings.length} value={profileZ} onChange={e => setProfileZ(Number(e.target.value))} className="w-28 accent-emerald-600" />
+                    <span className="font-mono w-14">{profileZ} m</span>
+                  </label>
+                </>
+              )}
             </div>
-            
+
+            <div className="absolute bottom-3 left-8 z-20 px-2.5 py-1 text-xs text-slate-600 bg-white/90 rounded shadow-sm border border-gray-200 pointer-events-none">{toolHint}</div>
+
             <div className="absolute top-10 right-4 bg-white/95 px-4 py-3 rounded-lg shadow-lg text-sm font-mono text-gray-700 pointer-events-none flex flex-col items-end border border-gray-200 z-20">
               <div className="font-bold text-gray-800 mb-1 border-b border-gray-200 pb-1 w-full text-right">
                 {show3D ? '3D Χώρος' : (viewMode === 'profile' ? 'Τομή X-Y' : 'Κάτοψη X-Z')}
@@ -2617,57 +2939,112 @@ const updateSelectedProp = (key, value) => {
           )}
 
           <div className="flex-1 min-h-0 overflow-y-auto flex flex-col">
-          <div className="p-4 border-b border-gray-100 bg-amber-50">
-            <h2 className="font-semibold text-amber-800 flex items-center gap-2 mb-3"><Timer size={18} /> Εξέλιξη στον Χρόνο (3D)</h2>
-            
-            <div className="flex gap-2 items-end mb-3">
-               <div className="flex-1">
-                 <label className="block text-xs text-amber-700 font-bold mb-1">Μέγιστος Χρόνος (Έτη)</label>
-                 <input type="number" value={timeSettings.maxYears} onChange={(e) => setTimeSettings(p => ({...p, maxYears: Number(e.target.value)}))} className="w-full p-2 text-sm border border-amber-300 rounded outline-none" min="0.1" step="any" />
-               </div>
-               <button onClick={() => solveConsolidationPDE()} disabled={isSolvingTime} className="bg-amber-600 hover:bg-amber-700 text-white px-3 py-2 rounded text-sm font-bold shadow-sm transition-colors disabled:opacity-50">Επίλυση</button>
-            </div>
 
-            {timeSnapshots && timeSnapshots.length > 0 && (
-                <div className="mt-4 p-3 bg-white rounded border border-amber-200 shadow-sm animate-in fade-in slide-in-from-top-2">
-                    <div className="flex justify-between items-center mb-2">
-                        <label className="text-xs font-bold text-slate-700">Timeline Στερεοποίησης</label>
-                        <span className="text-xs font-mono bg-amber-100 text-amber-800 px-2 py-0.5 rounded font-bold">
-                           {activeTimeIndex === -1 ? 'Άπειρος Χρόνος' : formatTime(timeSnapshots[activeTimeIndex].timeSec)}
-                        </span>
+          {/* ===================== CALCULATION ===================== */}
+          {uiMode === 'calc' && (
+            <>
+              <div className="p-4 border-b border-gray-100 bg-sky-50">
+                <h2 className="font-semibold text-sky-900 flex items-center gap-2 mb-3"><Grid3X3 size={18} /> Κάνναβος Επίλυσης</h2>
+                <div className="grid grid-cols-3 gap-2">
+                  {[['nx', 'Κόμβοι X'], ['ny', 'Κόμβοι Y'], ['nz', 'Κόμβοι Z']].map(([k, label]) => (
+                    <div key={k}>
+                      <label className="block text-xs text-gray-500 mb-1">{label}</label>
+                      <input type="number" value={calcSettings[k] ?? ''} min={CALC_LIMITS[k][0]} max={CALC_LIMITS[k][1]} step="1"
+                        onChange={e => setCalcSettings(p => ({ ...p, [k]: e.target.value === '' ? '' : Number(e.target.value) }))}
+                        className="w-full p-2 text-sm border border-gray-300 rounded" />
                     </div>
-                    {/* Θέσεις 0..n-1: στιγμιότυπα, τελευταία θέση (n): άπειρος χρόνος (activeTimeIndex = -1) */}
-                    <input
-                        type="range"
-                        min="0"
-                        max={timeSnapshots.length}
-                        value={activeTimeIndex === -1 ? timeSnapshots.length : activeTimeIndex}
-                        onChange={(e) => { const v = Number(e.target.value); setActiveTimeIndex(v === timeSnapshots.length ? -1 : v); }}
-                        className="w-full accent-amber-600 cursor-pointer"
-                    />
-                    <div className="flex justify-between text-[10px] text-slate-500 mt-1 font-medium">
-                        <span>{formatTime(timeSnapshots[0].timeSec)}</span>
-                        <span>{formatTime(timeSnapshots[timeSnapshots.length - 1].timeSec)}</span>
-                        <span>Άπειρο</span>
-                    </div>
+                  ))}
                 </div>
-            )}
-          </div>
+                {modelCache && (
+                  <div className="mt-2 text-xs text-slate-600 font-mono leading-relaxed">
+                    Δx = {modelCache.stepX.toFixed(2)} m · Δy = {modelCache.stepY.toFixed(2)} m · Δz = {modelCache.stepZ.toFixed(2)} m<br />
+                    {totalNodes.toLocaleString('el-GR')} κόμβοι
+                  </div>
+                )}
+                {totalNodes > 150000 && <div className="mt-1 text-xs text-amber-700">Πολλοί κόμβοι: η επίλυση και οι αλλαγές στο μοντέλο θα είναι αργές.</div>}
+                <p className="mt-2 text-[11px] text-slate-500 leading-snug">Ο κάνναβος φαίνεται στην τομή και στην κάτοψη. Πυκνότερος κάνναβος κατά Y μειώνει την υπερεκτίμηση της καθίζησης των πρώτων ημερών.</p>
+              </div>
 
-          <div className="p-4 border-b border-gray-100 bg-slate-50">
-            <h2 className="font-semibold text-gray-800 flex items-center gap-2 mb-4"><Settings2 size={18} /> Γενικές Ρυθμίσεις</h2>
-            <div className="space-y-4">
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">Στάθμη Γ.Ο.Υ (m)</label>
-                <input type="number" value={gwtLevel} onChange={(e) => setGwtLevel(Number(e.target.value))} className="w-full p-2 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 outline-none" step="0.5" />
+              <div className="p-4 border-b border-gray-100 bg-amber-50">
+                <h2 className="font-semibold text-amber-800 flex items-center gap-2 mb-3"><Timer size={18} /> Χρόνος</h2>
+                <div className="grid grid-cols-3 gap-2">
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1" title="Μέγιστος χρόνος επίλυσης">Tmax (έτη)</label>
+                    <input type="number" value={calcSettings.maxYears ?? ''} min="0.01" step="any"
+                      onChange={e => setCalcSettings(p => ({ ...p, maxYears: e.target.value === '' ? '' : Number(e.target.value) }))}
+                      className="w-full p-2 text-sm border border-amber-300 rounded" />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1" title="Χρονικά βήματα Δt ανά δεκάδα χρόνου (λογαριθμικά)">Βήματα/δεκάδα</label>
+                    <input type="number" value={calcSettings.stepsPerDecade ?? ''} min={CALC_LIMITS.stepsPerDecade[0]} max={CALC_LIMITS.stepsPerDecade[1]} step="1"
+                      onChange={e => setCalcSettings(p => ({ ...p, stepsPerDecade: e.target.value === '' ? '' : Number(e.target.value) }))}
+                      className="w-full p-2 text-sm border border-amber-300 rounded" />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1" title="Στιγμιότυπα για την απεικόνιση στον χρόνο">Στιγμιότυπα</label>
+                    <input type="number" value={calcSettings.snapshots ?? ''} min={CALC_LIMITS.snapshots[0]} max={CALC_LIMITS.snapshots[1]} step="1"
+                      onChange={e => setCalcSettings(p => ({ ...p, snapshots: e.target.value === '' ? '' : Number(e.target.value) }))}
+                      className="w-full p-2 text-sm border border-amber-300 rounded" />
+                  </div>
+                </div>
+                <div className="mt-2 text-xs text-slate-600 leading-relaxed">
+                  {schedule.times.length} χρονικά βήματα, λογαριθμικά από 1 ώρα έως {formatTime(calc.maxYears * 365.25 * 86400)} · στιγμιότυπα από 1 ημέρα
+                </div>
               </div>
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">Μήκος 3ης Διάστασης Z (m)</label>
-                <input type="number" value={projectSettings.length} onChange={(e) => setProjectSettings(prev => ({...prev, length: Number(e.target.value)}))} className="w-full p-2 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 outline-none" step="5" min="5" />
+
+              <div className="p-4 border-b border-gray-100 bg-teal-50">
+                <h2 className="font-semibold text-teal-900 flex items-center gap-2 mb-1"><Crosshair size={18} /> Σημεία Παρακολούθησης</h2>
+                <p className="text-[11px] text-slate-600 leading-snug mb-2">Σε κάθε χρονικό βήμα καταγράφονται εδώ η καθίζηση της επιφάνειας, η υπερπίεση και ο βαθμός στερεοποίησης. Νέο σημείο: εργαλείο <Crosshair size={11} className="inline" /> αριστερά και κλικ στην τομή, ή το κουμπί παρακάτω.</p>
+                {monitorPoints.length === 0 ? (
+                  <div className="text-xs text-slate-500 italic mb-2">Δεν έχουν οριστεί σημεία.</div>
+                ) : (
+                  <table className="w-full text-xs mb-2">
+                    <thead>
+                      <tr className="text-slate-500">
+                        <th className="text-left font-semibold pb-1">Όνομα</th>
+                        <th className="text-left font-semibold pb-1">X (m)</th>
+                        <th className="text-left font-semibold pb-1">Y (m)</th>
+                        <th className="text-left font-semibold pb-1">Z (m)</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {monitorPoints.map(p => (
+                        <tr key={p.id} onClick={() => setSelectedPointId(p.id)} className={`cursor-pointer ${p.id === selectedPointId ? 'bg-amber-100' : ''}`}>
+                          <td className="pr-1 py-0.5"><input type="text" value={p.name} onChange={e => updatePoint(p.id, 'name', e.target.value)} className="w-11 p-1 border border-gray-300 rounded bg-white" /></td>
+                          {['x', 'y', 'z'].map(k => (
+                            <td key={k} className="pr-1 py-0.5"><input type="number" value={p[k]} step="0.5" onChange={e => updatePoint(p.id, k, Number(e.target.value))} className="w-14 p-1 border border-gray-300 rounded bg-white font-mono" /></td>
+                          ))}
+                          <td><button onClick={(e) => { e.stopPropagation(); deletePoint(p.id); }} className="p-1 text-red-500 hover:bg-red-50 rounded" title={`Διαγραφή ${p.name}`}><Trash2 size={14} /></button></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+                <button onClick={addPointAtCenter} className="flex items-center gap-1 text-xs font-semibold text-teal-800 hover:bg-teal-100 px-2 py-1 rounded border border-teal-300"><Plus size={14} /> Νέο σημείο</button>
               </div>
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">Απεικόνιση Αποτελεσμάτων</label>
-                <select value={activeStressLayer} onChange={(e) => setActiveStressLayer(e.target.value)} className="w-full p-2 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 outline-none bg-white mb-3 font-semibold text-blue-800">
+
+              <div className="p-4 bg-white">
+                <button onClick={() => solveConsolidationPDE()} disabled={isSolvingTime || !modelCache}
+                  className="w-full flex items-center justify-center gap-2 bg-amber-600 hover:bg-amber-700 text-white px-4 py-3 rounded-lg text-base font-bold shadow-sm transition-colors disabled:opacity-50">
+                  <Play size={18} /> Επίλυση
+                </button>
+                <p className={`mt-2 text-xs ${timeSnapshots ? 'text-emerald-700' : 'text-slate-500'}`}>
+                  {timeSnapshots
+                    ? 'Υπάρχει ενημερωμένη λύση για τις τρέχουσες ρυθμίσεις. Τα αποτελέσματα είναι στο OUTPUT.'
+                    : 'Δεν υπάρχει λύση για τις τρέχουσες ρυθμίσεις. Μετά την επίλυση η εφαρμογή μεταβαίνει στο OUTPUT.'}
+                </p>
+              </div>
+            </>
+          )}
+
+          {/* ===================== OUTPUT ===================== */}
+          {uiMode === 'output' && (
+            <>
+              <div className="p-4 border-b border-gray-100 bg-slate-50">
+                <h2 className="font-semibold text-gray-800 flex items-center gap-2 mb-3"><Palette size={18} /> Απεικόνιση</h2>
+                <label className="block text-xs text-gray-500 mb-1">Μέγεθος</label>
+                <select value={selectedResultLayer} onChange={(e) => setSelectedResultLayer(e.target.value)} className="w-full p-2 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 outline-none bg-white mb-3 font-semibold text-blue-800">
                   <option value="none">Καμία</option>
                   <option value="sv0">Αρχική Ολική (σv0)</option>
                   <option value="u0">Υδροστατική Πίεση (u0)</option>
@@ -2679,8 +3056,7 @@ const updateSelectedProp = (key, value) => {
                   <option value="strain">Κατακόρυφη Παραμόρφωση (εy)</option>
                   <option value="Uz">Βαθμός Στερεοποίησης (Uz)</option>
                 </select>
-
-                {activeStressLayer !== 'none' && (
+                {selectedResultLayer !== 'none' && (
                   <div className="mb-3">
                     <label className="block text-xs text-gray-500 mb-1">Στυλ Heatmap</label>
                     <div className="flex bg-slate-200 p-1 rounded border border-slate-300">
@@ -2690,75 +3066,117 @@ const updateSelectedProp = (key, value) => {
                     </div>
                   </div>
                 )}
-                
-                <div className="bg-indigo-50 p-2 rounded border border-indigo-200 mt-3">
+                <div className="bg-indigo-50 p-2 rounded border border-indigo-200">
                   <label className="flex items-center gap-2 text-xs text-indigo-800 font-bold cursor-pointer mb-2">
-                    <input type="checkbox" checked={showDeformedMesh} onChange={e => setShowDeformedMesh(e.target.checked)} className="accent-indigo-600 w-4 h-4" />
+                    <input type="checkbox" checked={deformedMeshOn} onChange={e => setDeformedMeshOn(e.target.checked)} className="accent-indigo-600 w-4 h-4" />
                     Προβολή Παραμορφωμένου Δικτύου
                   </label>
                   <div className="flex items-center gap-2">
                     <label className="text-[10px] text-indigo-600 font-medium whitespace-nowrap">Κλίμακα x{meshMagnification}</label>
-                    <input type="range" min="1" max="100" value={meshMagnification} onChange={e => setMeshMagnification(Number(e.target.value))} className="w-full accent-indigo-600" disabled={!showDeformedMesh} />
+                    <input type="range" min="1" max="100" value={meshMagnification} onChange={e => setMeshMagnification(Number(e.target.value))} className="w-full accent-indigo-600" disabled={!deformedMeshOn} />
                   </div>
                 </div>
               </div>
+
+              <div className="p-4 border-b border-gray-100 bg-amber-50">
+                <h2 className="font-semibold text-amber-800 flex items-center gap-2 mb-3"><Timer size={18} /> Χρονική Εξέλιξη</h2>
+                {timeSnapshots && timeSnapshots.length > 0 ? (
+                  <div className="p-3 bg-white rounded border border-amber-200 shadow-sm">
+                    <div className="flex justify-between items-center mb-2">
+                      <label className="text-xs font-bold text-slate-700">Timeline Στερεοποίησης</label>
+                      <span className="text-xs font-mono bg-amber-100 text-amber-800 px-2 py-0.5 rounded font-bold">
+                        {activeTimeIndex === -1 ? 'Άπειρος Χρόνος' : formatTime(timeSnapshots[activeTimeIndex].timeSec)}
+                      </span>
+                    </div>
+                    {/* Θέσεις 0..n-1: στιγμιότυπα, τελευταία θέση (n): άπειρος χρόνος (activeTimeIndex = -1) */}
+                    <input
+                      type="range"
+                      min="0"
+                      max={timeSnapshots.length}
+                      value={activeTimeIndex === -1 ? timeSnapshots.length : activeTimeIndex}
+                      onChange={(e) => { const v = Number(e.target.value); setActiveTimeIndex(v === timeSnapshots.length ? -1 : v); }}
+                      className="w-full accent-amber-600 cursor-pointer"
+                    />
+                    <div className="flex justify-between text-[10px] text-slate-500 mt-1 font-medium">
+                      <span>{formatTime(timeSnapshots[0].timeSec)}</span>
+                      <span>{formatTime(timeSnapshots[timeSnapshots.length - 1].timeSec)}</span>
+                      <span>Άπειρο</span>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-xs text-slate-600 leading-snug">
+                    <p className="mb-2">Δεν υπάρχει λύση στον χρόνο. Τα μεγέθη που δεν εξαρτώνται από τον χρόνο (τάσεις, τελική καθίζηση) εμφανίζονται κανονικά.</p>
+                    <button onClick={() => solveConsolidationPDE()} disabled={isSolvingTime || !modelCache} className="flex items-center gap-1.5 bg-amber-600 hover:bg-amber-700 text-white px-3 py-1.5 rounded text-xs font-bold disabled:opacity-50"><Play size={14} /> Επίλυση τώρα</button>
+                  </div>
+                )}
+              </div>
+
+              <div className="p-4 border-b border-gray-100 bg-teal-50">
+                <h2 className="font-semibold text-teal-900 flex items-center gap-2 mb-2"><LineChart size={18} /> Διαγράμματα Σημείων</h2>
+                {monitorPoints.length === 0 ? (
+                  <p className="text-xs text-slate-600">Δεν έχουν οριστεί σημεία παρακολούθησης. Ορίζονται στο CALCULATION.</p>
+                ) : !monitorHistories ? (
+                  <p className="text-xs text-slate-600">Τα διαγράμματα είναι διαθέσιμα μετά την επίλυση.</p>
+                ) : (
+                  <ul className="space-y-1">
+                    {monitorPoints.map(p => {
+                      const h = monitorHistories[p.id];
+                      return (
+                        <li key={p.id} className="flex items-center gap-2 bg-white rounded border border-teal-200 px-2 py-1.5">
+                          <span className="text-xs font-bold text-teal-900 w-8">{p.name}</span>
+                          <span className="text-[11px] font-mono text-slate-600 flex-1">{Number(p.x)}, {Number(p.y)}, {Number(p.z)}</span>
+                          {h ? (
+                            <>
+                              <button onClick={() => setTimePlotData(h)} className="p-1 text-teal-700 hover:bg-teal-100 rounded" title={`Διάγραμμα χρόνου ${p.name}`}><LineChart size={16} /></button>
+                              <button onClick={() => downloadHistoryCsv(h)} className="p-1 text-teal-700 hover:bg-teal-100 rounded" title={`Τιμές ${p.name} σε CSV`}><FileDown size={16} /></button>
+                            </>
+                          ) : <span className="text-[10px] text-slate-400">χωρίς λύση</span>}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </div>
+
+              {show3D && (
+                <div className="p-4 border-b border-gray-100 bg-purple-50">
+                  <h2 className="font-semibold text-purple-800 flex items-center gap-2 mb-4"><Box size={18} /> Επίπεδα 3D Απεικόνισης</h2>
+                  <div className="space-y-4">
+                    {[
+                      ['depth', 'Επίπεδο X-Y (τομή κατά Z)'],
+                      ['horizontal', 'Επίπεδο X-Z (κάτοψη κατά Y)'],
+                      ['vertical', 'Επίπεδο Y-Z (διατομή κατά X)'],
+                    ].map(([k, label]) => (
+                      <div key={k}>
+                        <label className="text-xs text-gray-700 font-medium flex items-center gap-2 cursor-pointer mb-1">
+                          <input type="checkbox" checked={heatmaps[k]} onChange={e => setHeatmaps(prev => ({ ...prev, [k]: e.target.checked }))} className="accent-purple-600" />
+                          {label}
+                        </label>
+                        <input type="range" min="0" max="100" value={heatmapLevels[k]} onChange={e => setHeatmapLevels(prev => ({ ...prev, [k]: Number(e.target.value) }))} className="w-full accent-purple-600" disabled={!heatmaps[k]} />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+
+          {/* ===================== INPUT ===================== */}
+          {uiMode === 'input' && (
+            <>
+          <div className="p-4 border-b border-gray-100 bg-slate-50">
+            <h2 className="font-semibold text-gray-800 flex items-center gap-2 mb-4"><Settings2 size={18} /> Γενικά Στοιχεία</h2>
+            <div className="space-y-4">
               <div>
-                <label className="flex items-center gap-2 text-xs text-gray-700 font-medium cursor-pointer bg-white p-2 rounded border border-gray-200">
-                  <input type="checkbox" checked={showLabels} onChange={e => setShowLabels(e.target.checked)} className="accent-blue-600 w-4 h-4" />
-                  Εμφάνιση Όλων των Ετικετών (Labels)
-                </label>
+                <label className="block text-xs text-gray-500 mb-1">Στάθμη Γ.Ο.Υ (m)</label>
+                <input type="number" value={gwtLevel} onChange={(e) => setGwtLevel(Number(e.target.value))} className="w-full p-2 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 outline-none" step="0.5" />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">Μήκος 3ης Διάστασης Z (m)</label>
+                <input type="number" value={projectSettings.length} onChange={(e) => setProjectSettings(prev => ({...prev, length: Number(e.target.value)}))} className="w-full p-2 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 outline-none" step="5" min="5" />
               </div>
             </div>
           </div>
-
-          {!show3D && viewMode === 'profile' && (
-            <div className="p-4 border-b border-gray-100 bg-emerald-50">
-              <label className="block text-xs text-emerald-800 font-bold mb-2">Θέση Τομής 2D (Z = {profileZ}m)</label>
-              <input type="range" min="0" max={projectSettings.length} value={profileZ} onChange={e => setProfileZ(Number(e.target.value))} className="w-full accent-emerald-600" />
-            </div>
-          )}
-
-          {show3D && (
-            <div className="p-4 border-b border-gray-100 bg-purple-50">
-              <h2 className="font-semibold text-purple-800 flex items-center gap-2 mb-4"><Box size={18} /> Επίπεδα 3D Απεικόνισης</h2>
-              <div className="space-y-4">
-                <div>
-                  <div className="flex justify-between items-center mb-1">
-                    <label className="text-xs text-gray-700 font-medium flex items-center gap-2 cursor-pointer">
-                      <input type="checkbox" checked={heatmaps.depth} onChange={e => setHeatmaps(prev => ({...prev, depth: e.target.checked}))} className="accent-purple-600" /> 
-                      Επίπεδο X-Y (Τομή κατά Z)
-                    </label>
-                  </div>
-                  <input type="range" min="0" max="100" value={heatmapLevels.depth} onChange={e => setHeatmapLevels(prev => ({...prev, depth: Number(e.target.value)}))} className="w-full accent-purple-600" disabled={!heatmaps.depth} />
-                </div>
-                <div>
-                  <div className="flex justify-between items-center mb-1">
-                    <label className="text-xs text-gray-700 font-medium flex items-center gap-2 cursor-pointer">
-                      <input type="checkbox" checked={heatmaps.horizontal} onChange={e => setHeatmaps(prev => ({...prev, horizontal: e.target.checked}))} className="accent-purple-600" /> 
-                      Επίπεδο X-Z (Κάτοψη κατά Y)
-                    </label>
-                  </div>
-                  <input type="range" min="0" max="100" value={heatmapLevels.horizontal} onChange={e => setHeatmapLevels(prev => ({...prev, horizontal: Number(e.target.value)}))} className="w-full accent-purple-600" disabled={!heatmaps.horizontal} />
-                </div>
-                <div>
-                  <div className="flex justify-between items-center mb-1">
-                    <label className="text-xs text-gray-700 font-medium flex items-center gap-2 cursor-pointer">
-                      <input type="checkbox" checked={heatmaps.vertical} onChange={e => setHeatmaps(prev => ({...prev, vertical: e.target.checked}))} className="accent-purple-600" /> 
-                      Επίπεδο Y-Z (Διατομή κατά X)
-                    </label>
-                  </div>
-                  <input type="range" min="0" max="100" value={heatmapLevels.vertical} onChange={e => setHeatmapLevels(prev => ({...prev, vertical: Number(e.target.value)}))} className="w-full accent-purple-600" disabled={!heatmaps.vertical} />
-                </div>
-                
-                <div className="pt-3 mt-2 border-t border-purple-200">
-                  <label className="text-xs text-purple-900 font-bold flex items-center gap-2 cursor-pointer">
-                    <input type="checkbox" checked={show3DModels} onChange={e => setShow3DModels(e.target.checked)} className="accent-purple-600 w-4 h-4" /> 
-                    Εμφάνιση Μοντέλων (Επιχώματα/Φορτία)
-                  </label>
-                </div>
-              </div>
-            </div>
-          )}
 
           <div className="p-4 border-b border-gray-100 bg-white">
             <label className="block text-xs text-gray-700 font-semibold mb-2">Λίστα Στοιχείων Μοντέλου</label>
@@ -2901,6 +3319,8 @@ const updateSelectedProp = (key, value) => {
               </div>
             )}
           </div>
+            </>
+          )}
           </div>
         </div>
       </div>

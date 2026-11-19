@@ -23,4 +23,4 @@ npm run dev
 
 ## Εγχειρίδιο
 
-Η πηγή του εγχειριδίου είναι το [docs/manual/cons3d_manual.tex](docs/manual/cons3d_manual.tex) (LuaLaTeX, γραμματοσειρά Noto Sans). Μεταγλώττιση με `lualatex cons3d_manual.tex` δύο φορές και αντιγραφή του PDF στη ρίζα ως «Εγχειρίδιο CONS3D.pdf».
+Η πηγή του εγχειριδίου είναι το [docs/manual/cons3d_manual.tex](docs/manual/cons3d_manual.tex) (LuaLaTeX, γραμματοσειρές Noto Sans και, στο εξώφυλλο, Noto Serif). Στον ίδιο φάκελο βρίσκονται το λογότυπο και οι δύο εικόνες του εξωφύλλου, που είναι στιγμιότυπα της εφαρμογής. Μεταγλώττιση με `lualatex cons3d_manual.tex` δύο φορές και αντιγραφή του PDF στη ρίζα ως «Εγχειρίδιο CONS3D.pdf».
